@@ -4,4 +4,5 @@ scipy
 scikit-learn
 torch
 torch_geometric
+torch_scatter
 stable_baselines3

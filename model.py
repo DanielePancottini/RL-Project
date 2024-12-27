@@ -25,7 +25,7 @@ class GNNWithAttention(nn.Module):
         )
 
         self.gat2 = nn.Sequential(
-            GATConv(hidden_dim, hidden_dim, heads=1, concat=True),
+            GATConv(hidden_dim, output_dim, heads=1, concat=True),
             nn.ReLU()
         )
 

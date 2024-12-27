@@ -6,6 +6,7 @@ import numpy as np
 from gymnasium import Env, spaces
 
 from torch_geometric.utils import subgraph
+from torch_scatter import scatter
 
 class Enviroment(Env):
 
@@ -17,7 +18,7 @@ class Enviroment(Env):
         self.features_dim = self.graph.x.shape[1]
         self.max_steps = max_steps
         self.current_step = 0
-        self.subgraph_mask = torch.zeros(self.num_nodes, dtype=bool)
+        self.subgraph_mask = torch.ones(self.num_nodes, dtype=bool)
         self.graph_attention = torch.zeros(self.num_nodes)
 
         #Compute attention for each node in the original graph
@@ -25,17 +26,12 @@ class Enviroment(Env):
 
         #Observation space
         self.observation_space = spaces.Dict({
-            "features": spaces.Box(-np.inf, np.inf, shape=self.graph.x.shape, dtype=np.float32),
+            "features": spaces.Box(-np.inf, np.inf, shape=(self.num_nodes, self.features_dim), dtype=np.float32),
             "edge_index": spaces.Box(0, self.num_nodes - 1, shape=self.graph.edge_index.shape, dtype=np.int64),
         })
 
         #Action space
-        self.action_space = spaces.Box(
-            low = 0.0,
-            high = 1.0,
-            shape = (self.num_nodes, ),
-            dtype = np.float32
-        )
+        self.action_space = spaces.Box(low = 0.0, high = 1.0, shape=(self.num_nodes), dtype = np.float32)
 
     """
         Execute the input action into the enviroment
@@ -59,7 +55,7 @@ class Enviroment(Env):
     """
     def reset(self):
         self.current_step = 0
-        self.subgraph_mask = torch.zeros(self.num_nodes)
+        self.subgraph_mask = torch.ones(self.num_nodes)
         self.graph_attention = torch.zeros(self.num_nodes)
         return self._get_observation()
         
@@ -87,7 +83,7 @@ class Enviroment(Env):
 
     def _get_observation(self):
         return {
-            "features": self.graph.x[self.subgraph_mask].numpy(),
+            "features": self.graph.x.numpy(),
             "edge_index": subgraph(self.subgraph_mask, self.graph.edge_index).numpy()
         }
 
@@ -101,10 +97,6 @@ class Enviroment(Env):
         self.model.eval()
         with torch.no_grad():
             _, (edge_index, attention) = self.model(features, edge_index)
-            node_attention = torch.zeros(self.num_nodes)  # Initialize node attention scores
-
-            # Aggregate attention scores for incoming edges
-            for (src, dest), score in zip(edge_index.t().tolist(), attention.tolist()):
-                node_attention[dest] += score
+            node_attention = scatter(attention, edge_index[1], dim=0, reduce="mean")
 
         return node_attention.numpy()
