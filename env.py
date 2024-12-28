@@ -31,7 +31,7 @@ class Enviroment(Env):
         })
 
         #Action space
-        self.action_space = spaces.Box(low = 0.0, high = 1.0, shape=(self.num_nodes), dtype = np.float32)
+        self.action_space = spaces.Box(low = 0.0, high = 1.0, shape=(self.num_nodes, ), dtype = np.float32)
 
     """
         Execute the input action into the enviroment

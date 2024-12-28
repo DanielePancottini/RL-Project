@@ -1,9 +1,7 @@
-import torch
-
 from torch_geometric.datasets import Planetoid
-from torch_geometric.data import Data
+from torch_geometric.data import DataLoader
 
-from model import GNNWithAttention
+from train_gat import TrainGAT
 
 # Load the CORA dataset
 dataset = Planetoid(root="data/CORA", name="CORA")
@@ -13,9 +11,11 @@ print("Graph data:")
 print(f"Nodes: {graph_data.num_nodes}, Edges: {graph_data.num_edges}")
 print(f"Features shape: {graph_data.x.shape}, Labels: {graph_data.y.unique()}")
 
-in_channels = graph_data.num_node_features
-hidden_channels = 16
-out_channels = dataset.num_classes  # For CORA, it's 7
+# Train GNN
 
-model = GNNWithAttention(in_channels, hidden_channels, out_channels)
-print(model)
+trainer = TrainGAT(dataset, graph_data)
+trained_model = trainer.train_gat()
+
+# Evaluate the model on the test set
+test_accuracy = trainer.evaluate_accuracy(trained_model, dataset)
+print(f'Test Accuracy: {test_accuracy:.4f}')
