@@ -2,66 +2,80 @@ import torch
 
 import torch.nn.functional as F
 
-from model import GNNWithAttention
+class Trainer:
+    def __init__(self, model, device):
 
-class TrainGAT:
-    def __init__(self, dataset, graph_data):
-        self.data = graph_data    
-        self.in_channels = self.data.num_node_features
-        self.hidden_channels = 128
-        self.out_channels = 64 
-        self.num_heads = 8
-        self.num_classes = dataset.num_classes 
-        self.num_epochs = 100
+        self.device = device
+
+        # Training params
+        self.num_epochs = 10
+        self.batch_size = 32
         self.weight_decay = 1e-2
         self.lr = 1e-2
+        
+        # Model & Optimizer
+        self.model = model
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', patience=3, factor=0.5, verbose=True)
 
-        self.model = GNNWithAttention(
-            self.in_channels,
-            self.hidden_channels,
-            self.out_channels,
-            num_heads = self.num_heads,
-            num_classes = self.num_classes
-        )
-
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.01, weight_decay=1e-2)
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 'min', patience=3, factor=0.5, verbose=True)
-
-    def train_gat(self):
-
+    def train(self, train_loader, test_loader):
         self.model.train()
 
         for epoch in range(self.num_epochs):
-            self.optimizer.zero_grad()
-            output = self.model(self.data.x, self.data.edge_index)
-            loss = F.cross_entropy(output[self.data.train_mask], self.data.y[self.data.train_mask])
-            loss.backward()
-            self.optimizer.step()
+            total_loss = 0
+
+            for data in train_loader:
+                
+                data = data.to(self.device)
+
+                # Forward pass
+                self.optimizer.zero_grad()
+                output = self.model(data)
+                loss = F.cross_entropy(output, data.y)
+
+                # Backpropagation
+                loss.backward()
+                self.optimizer.step()
+
+                total_loss += loss.item()
 
             # Validation loss
-            val_loss = self._evaluate_loss(self.model, self.data, mask=self.data.val_mask)
+            val_loss = self._evaluate_loss(test_loader)
 
             # Scheduler step
             self.scheduler.step(val_loss)
 
-            print(f'Epoch {epoch + 1}/{self.num_epochs}, Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f}')
+            print(f"Epoch {epoch+1}/{self.num_epochs}, Train Loss: {total_loss:.4f}, Val Loss: {val_loss:.4f}")
 
         return self.model
 
-    def evaluate_accuracy(self, model, data):
-        model.eval()
+    def evaluate_accuracy(self, test_loader):
+        self.model.eval()
+        correct = 0
+        total = 0
+
         with torch.no_grad():
-            output = model(data.x, data.edge_index)
-            preds = output[data.test_mask].max(1)[1]
-            correct = preds.eq(data.y[data.test_mask]).sum().item()
-            accuracy = correct / data.test_mask.sum().item()
+            for data in test_loader:
+                data = data.to(self.device)
+                output = self.model(data)
+                preds = output.argmax(dim=1)  # Get class with max probability
+                correct += (preds == data.y).sum().item()
+                total += data.y.size(0)
+
+        accuracy = correct / total
+        print(f"Test Accuracy: {accuracy:.4f}")
         return accuracy
 
-    def _evaluate_loss(self, model, data, mask):
-        model.eval()
+    def _evaluate_loss(self, test_loader):
+        self.model.eval()
+        total_loss = 0
         with torch.no_grad():
-            output = model(data.x, data.edge_index)
-            loss = F.cross_entropy(output[mask], data.y[mask])
-        return loss.item()
+            for data in test_loader:
+                data = data.to(self.device)
+                output = self.model(data)
+                loss = F.cross_entropy(output, data.y)
+                total_loss += loss.item()
+
+        return total_loss / len(test_loader)
 
    
