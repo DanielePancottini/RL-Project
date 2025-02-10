@@ -7,3 +7,4 @@ torch_geometric
 torch_scatter
 stable_baselines3
 rdkit
+deepchem

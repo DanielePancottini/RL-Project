@@ -82,3 +82,6 @@ checkpoints/    # Model checkpoints
 saved_models/   # Trained models
 *.mp4           # Saved video of episodes
 *.csv           # Data logs
+
+# Datasets
+data/
