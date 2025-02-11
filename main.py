@@ -35,6 +35,7 @@ class_weights = torch.tensor([len(dataset)/(2*count) for _, count in class_count
 
 # Print class balances in one line
 print("HIV Class Balances: " + ", ".join([f"Class {cls}: {count}" for cls, count in class_counts.items()]))
+print(f"Class Weights: {class_weights}")
 
 """
     Random Splitting Section
@@ -44,8 +45,8 @@ print("HIV Class Balances: " + ", ".join([f"Class {cls}: {count}" for cls, count
 indices = np.arange(len(dataset))
 
 # Split indices into training (80%), validation (10%), and test (10%) sets
-train_indices, temp_indices = train_test_split(indices, test_size=0.2, random_state=42)
-valid_indices, test_indices = train_test_split(temp_indices, test_size=0.5, random_state=42)
+train_indices, temp_indices = train_test_split(indices, test_size=0.2, random_state=42, stratify=labels)
+valid_indices, test_indices = train_test_split(temp_indices, test_size=0.5, random_state=42, stratify=labels[temp_indices])
 
 # Step 3: Create DataLoader for each dataset
 train_dataset = dataset[torch.tensor(train_indices, dtype=torch.long)]
@@ -115,7 +116,7 @@ trained_model = trainer.train(train_loader, val_loader)
 """
 
 # Evaluate the model on the test set
-accuracy, precision, recall, f1, conf_matrix = trainer.evaluate_metrics(test_loader)
+accuracy, precision, recall, f1, conf_matrix, auc_roc = trainer.evaluate_metrics(test_loader)
 
 # Print metrics
 print(f"Test Accuracy: {accuracy:.4f}")
@@ -123,3 +124,4 @@ print(f"Test Precision: {precision:.4f}")
 print(f"Test Recall: {recall:.4f}")
 print(f"Test F1 Score: {f1:.4f}")
 print("Confusion Matrix:\n", conf_matrix)
+print(f"AUC-ROC: {auc_roc}")

@@ -27,6 +27,7 @@ class Trainer:
 
         for epoch in range(self.num_epochs):
             total_loss = 0
+            total_samples = 0
 
             for batch_idx, data in enumerate(train_loader):
                 
@@ -34,7 +35,6 @@ class Trainer:
 
                 # Forward pass
                 self.optimizer.zero_grad()
-
                 output = self.model(data)
                 target = data.y.squeeze().long()
 
@@ -45,7 +45,13 @@ class Trainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)  # Gradient clipping
                 self.optimizer.step()
-                total_loss += loss.item()
+
+                # Accumulate loss
+                total_loss += loss.item() * data.y.size(0)
+                total_samples += data.y.size(0)
+
+            # Average training loss
+            avg_train_loss = total_loss / total_samples if total_samples > 0 else float('inf')
 
             # Validation loss
             val_loss = self._evaluate_loss(val_loader)
@@ -53,7 +59,7 @@ class Trainer:
             # Scheduler step
             self.scheduler.step(val_loss)
 
-            print(f"Epoch {epoch+1}/{self.num_epochs}, Train Loss: {total_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Epoch {epoch+1}/{self.num_epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
         return self.model
 
