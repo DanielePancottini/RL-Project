@@ -63,13 +63,20 @@ std = all_x_train.std(dim=0, keepdim=True) + 1e-6  # Avoid division by zero
 
 # Normalize train and test datasets using **training** statistics
 def normalize_dataset(dataset, mean, std):
-    for data in dataset:
-        data.x = (data.x.float() - mean) / std
+    # Modify the internal storage directly
+    dataset._data.x = (dataset._data.x.float() - mean) / std
+    
+    # Clear the cache to ensure modifications are applied
+    dataset._data_list = None
+    
     return dataset
 
 train_dataset = normalize_dataset(train_dataset, mean, std)
 val_dataset = normalize_dataset(val_dataset, mean, std)
 test_dataset = normalize_dataset(test_dataset, mean, std)
+
+# Check if normalization was applied
+print("Normalized train dataset first example:", train_dataset[0])
 
 """
     Data Loaders Section
