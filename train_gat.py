@@ -10,7 +10,7 @@ class Trainer:
         self.device = device
 
         # Training params
-        self.num_epochs = 50
+        self.num_epochs = 10
         self.weight_decay = 1e-4
         self.lr = 1e-3
         

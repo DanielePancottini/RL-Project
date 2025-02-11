@@ -24,11 +24,41 @@ dataset = MoleculeNet(root='./data', name='HIV')
 print(f'Dataset size: {len(dataset)} | Dataset classes: {dataset.num_classes} | Target shape: {dataset.y.shape}')
 print(dataset[0])  # Print details of the first molecule graph
 
+"""
+    Upsampling Section
+"""
+
 # Assuming `data.y` contains the class labels
 labels = dataset.data.y.squeeze().cpu().numpy()
 
+# Assuming `dataset` is your original dataset and `labels` are the class labels
+minority_class = 1.0  # Active molecules
+majority_class = 0.0  # Inactive molecules
+
+# Get indices of minority and majority classes
+minority_indices = [i for i, label in enumerate(labels) if label == minority_class]
+majority_indices = [i for i, label in enumerate(labels) if label == majority_class]
+
+# Create subsets for minority and majority classes
+minority_dataset = dataset[torch.tensor(minority_indices, dtype=torch.long)]
+majority_dataset = dataset[torch.tensor(majority_indices, dtype=torch.long)]
+
+# Calculate how many times to duplicate the minority class
+num_minority = len(minority_dataset)  # Number of samples in minority class
+num_majority = len(majority_dataset)  # Number of samples in majority class
+upsample_factor = num_majority // num_minority  # How many times to duplicate
+
+# Duplicate the minority class samples
+upsampled_minority_dataset = torch.utils.data.ConcatDataset([minority_dataset] * upsample_factor)
+
+# Combine the upsampled minority class with the majority class
+balanced_dataset = upsampled_minority_dataset + majority_dataset
+
+# Update labels after upsampling
+balanced_labels = [data.y.item() for data in balanced_dataset]
+
 # Count class occurrences
-class_counts = Counter(labels)
+class_counts = Counter(balanced_labels)
 
 # Class weights 
 class_weights = torch.tensor([len(dataset)/(2*count) for _, count in class_counts.items()]).to(device)
@@ -42,16 +72,16 @@ print(f"Class Weights: {class_weights}")
 """
 
 # Train-Test split (80% train, 10% validation, 10% test)
-indices = np.arange(len(dataset))
+indices = np.arange(len(balanced_dataset))
 
 # Split indices into training (80%), validation (10%), and test (10%) sets
-train_indices, temp_indices = train_test_split(indices, test_size=0.2, random_state=42, stratify=labels)
-valid_indices, test_indices = train_test_split(temp_indices, test_size=0.5, random_state=42, stratify=labels[temp_indices])
+train_indices, temp_indices = train_test_split(indices, test_size=0.2, random_state=42)
+valid_indices, test_indices = train_test_split(temp_indices, test_size=0.5, random_state=42)
 
 # Step 3: Create DataLoader for each dataset
-train_dataset = dataset[torch.tensor(train_indices, dtype=torch.long)]
-val_dataset = dataset[torch.tensor(valid_indices, dtype=torch.long)]
-test_dataset = dataset[torch.tensor(test_indices, dtype=torch.long)]
+train_dataset = [balanced_dataset[i] for i in train_indices]
+val_dataset = [balanced_dataset[i] for i in valid_indices]
+test_dataset = [balanced_dataset[i] for i in test_indices]
 
 """
     Input Normalization Section
@@ -64,11 +94,8 @@ std = all_x_train.std(dim=0, keepdim=True) + 1e-6  # Avoid division by zero
 
 # Normalize train and test datasets using **training** statistics
 def normalize_dataset(dataset, mean, std):
-    # Modify the internal storage directly
-    dataset._data.x = (dataset._data.x.float() - mean) / std
-    
-    # Clear the cache to ensure modifications are applied
-    dataset._data_list = None
+    for data in dataset:
+        data.x = (data.x.float() - mean) / std
     
     return dataset
 
@@ -77,7 +104,7 @@ val_dataset = normalize_dataset(val_dataset, mean, std)
 test_dataset = normalize_dataset(test_dataset, mean, std)
 
 # Check if normalization was applied
-print("Normalized train dataset first example:", train_dataset[0])
+print("Normalized train dataset first example:", train_dataset[0], train_dataset[0].x)
 
 """
     Data Loaders Section
