@@ -138,6 +138,9 @@ model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, hea
 trainer = Trainer(model, class_weights, device)
 trained_model = trainer.train(train_loader, val_loader)
 
+# Save the model
+torch.save(trained_model.state_dict(), "./models/trained_model.pt")
+
 """
     Evaluation Section
 """
