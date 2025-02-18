@@ -1,102 +1,172 @@
-#TODO Define the enviroment
-
 import torch
+import torch.nn as nn
+
 import numpy as np
 
-from gymnasium import Env, spaces
+import gymnasium as gym
+from gymnasium import spaces
 
-from torch_geometric.utils import subgraph
-from torch_scatter import scatter
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Data
 
-class Enviroment(Env):
-
-    def __init__(self, graph, model, max_steps = 10):
-        super(Enviroment, self).__init__()
-        self.graph = graph
-        self.model = model
-        self.num_nodes = self.graph.x.shape[0]
-        self.features_dim = self.graph.x.shape[1]
-        self.max_steps = max_steps
-        self.current_step = 0
-        self.subgraph_mask = torch.ones(self.num_nodes, dtype=bool)
-        self.graph_attention = torch.zeros(self.num_nodes)
-
-        #Compute attention for each node in the original graph
-        self.graph_attention = self._compute_attention(self.graph.x, self.graph.edge_index)
-
-        #Observation space
-        self.observation_space = spaces.Dict({
-            "features": spaces.Box(-np.inf, np.inf, shape=(self.num_nodes, self.features_dim), dtype=np.float32),
-            "edge_index": spaces.Box(0, self.num_nodes - 1, shape=self.graph.edge_index.shape, dtype=np.int64),
-        })
-
-        #Action space
-        self.action_space = spaces.Box(low = 0.0, high = 1.0, shape=(self.num_nodes, ), dtype = np.float32)
-
-    """
-        Execute the input action into the enviroment
-    """
-    def step(self, action):
-
-        selected_nodes = torch.tensor([prob > np.random.uniform(0, 1) for prob in action])
-        self.subgraph_mask = self.subgraph_mask | selected_nodes
-
-        # Calculate reward based on the current subgraph's interpretability or performance
-        reward = self._calculate_reward()
-
-        #Check termination
-        self.current_step += 1
-        done = self.current_step >= self.max_steps
-
-        return self._get_observation(), reward, done, {}
-
-    """
-        Reset the enviroment
-    """
-    def reset(self):
-        self.current_step = 0
-        self.subgraph_mask = torch.ones(self.num_nodes)
-        self.graph_attention = torch.zeros(self.num_nodes)
-        return self._get_observation()
+class GNNInterpretEnvironment(gym.Env):
+    def __init__(self, gnn_model, dataloader, batch_size=32, device='cuda'):
+        super().__init__()
+        self.gnn_model = gnn_model
+        self.dataloader = dataloader
+        self.data_iter = iter(dataloader)
+        self.device = device
         
-    def _calculate_reward(self):
+        # Get max nodes/edges across over the possible batches
+        # We can define fixed action and obeservation spaces
 
-        #Compute the attention of the subgraph
-        sub_edge_index = subgraph(self.subgraph_mask, self.graph.edge_index)
-        sub_attention = self._compute_attention(self.graph.x[self.subgraph_mask], sub_edge_index)
+        self.max_nodes, self.max_edges = get_max_nodes_edges(dataloader, batch_size)
+       
+        # Action space: continuous values between 0 and 1 for each node and edge
+        # Will be truncated to match actual batch size during step()
+        self.action_space = spaces.Box(
+            low=0,
+            high=1,
+            shape=(self.max_nodes + self.max_edges,),
+            dtype=np.float32
+        )
+        
+        # Take a batch to extract the number of features
+        example_batch = next(self.data_iter)
 
-        # Attention alignment reward
-        attention_reward = sub_attention.sum() / self.graph_attention.sum()
+        # Observation space matches PyG's batch format
+        self.observation_space = spaces.Dict({
+            'x': spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.max_nodes, example_batch.shape[1]),
+                dtype=np.float32
+            ),
+            'edge_index': spaces.Box(
+                low=0,
+                high=self.max_nodes,
+                shape=(2, self.max_edges),
+                dtype=np.int64
+            ),
+            'batch': spaces.Box(
+                low=0,
+                high=batch_size,
+                shape=(self.max_nodes,),
+                dtype=np.int64
+            )
+        })
+    
+    def reset(self, seed=None):
+        super().reset(seed=seed)
+        
+        # Get next batch
+        try:
+            self.current_batch = next(self.data_iter)
+        except StopIteration:
+            self.data_iter = iter(self.dataloader)
+            self.current_batch = next(self.data_iter)
+        
+        self.current_batch = self.current_batch.to(self.device)
 
-        # Task-specific reward (e.g., quality of the subgraph)
-        subgraph_nodes = np.where(self.subgraph_mask > 0)[0]
-        task_reward = self._evaluate_subgraph(subgraph_nodes)
+        # Pad data to max_nodes / max_edges
+        x_padded = torch.zeros((self.max_nodes, self.current_batch.x.size(1)), device=self.device)
+        x_padded[:self.current_batch.x.size(0)] = self.current_batch.x
 
-        # Composite reward
-        alpha, beta = 0.5, 0.5  # Tune weights
-        return alpha * task_reward + beta * attention_reward
+        edge_index_padded = torch.zeros((2, self.max_edges), dtype=torch.int64, device=self.device)
+        edge_index_padded[:, :self.current_batch.edge_index.size(1)] = self.current_batch.edge_index
 
-    def _evaluate_subgraph(self, subgraph_nodes):
-        # Placeholder for a task-specific evaluation, e.g., classification accuracy
-        # Replace with your task's logic
-        return len(subgraph_nodes) / self.num_nodes
+        batch_padded = torch.zeros((self.max_nodes,), dtype=torch.int64, device=self.device)
+        batch_padded[:self.current_batch.batch.size(0)] = self.current_batch.batch
 
-    def _get_observation(self):
-        return {
-            "features": self.graph.x.numpy(),
-            "edge_index": subgraph(self.subgraph_mask, self.graph.edge_index).numpy()
+        observation = {
+            'x': x_padded.cpu().numpy(),
+            'edge_index': edge_index_padded.cpu().numpy(),
+            'batch': batch_padded.cpu().numpy()
         }
 
-    def _compute_attention(self, features, edge_index):
-        """
-        Recompute node-level attention weights using the GAT model.
+        info = {
+            'num_graphs': self.current_batch.num_graphs,
+            'num_nodes': self.current_batch.x.size(0),
+            'num_edges': self.current_batch.edge_index.size(1)
+        }
 
-        Returns:
-            np.ndarray: Updated node-level attention weights for the selected subgraph.
-        """
-        self.model.eval()
+        return observation, info
+    
+    def step(self, action):
+        # Get current batch sizes
+        num_nodes = self.current_batch.x.size(0)
+        num_edges = self.current_batch.edge_index.size(1)
+        
+        # Truncate action to match current batch
+        node_mask = torch.tensor(action[:num_nodes], device=self.device)
+        edge_mask = torch.tensor(action[num_nodes:num_nodes + num_edges], device=self.device)
+        
+        # Apply masks
+        masked_x = self.current_batch.x * node_mask.unsqueeze(-1)
+        masked_edge_index = self.current_batch.edge_index[:, edge_mask > 0.5]
+        
+        # Create masked batch
+        masked_batch = Data(
+            x=masked_x,
+            edge_index=masked_edge_index,
+            batch=self.current_batch.batch
+        )
+        
+        # Get predictions
         with torch.no_grad():
-            _, (edge_index, attention) = self.model(features, edge_index)
-            node_attention = scatter(attention, edge_index[1], dim=0, reduce="mean")
+            original_pred = self.gnn_model(self.current_batch)
+            masked_pred = self.gnn_model(masked_batch)
+        
+        # Compute reward
+        pred_similarity = -nn.F.mse_loss(masked_pred, original_pred)
+        sparsity = -(node_mask.mean() + edge_mask.mean()) * 0.1
+        reward = pred_similarity + sparsity
+        
+        # Get next batch
+        try:
+            self.current_batch = next(self.data_iter)
+        except StopIteration:
+            self.data_iter = iter(self.dataloader)
+            self.current_batch = next(self.data_iter)
+            
+        self.current_batch = self.current_batch.to(self.device)
+        
+        # Pad next batch
+        x_padded = torch.zeros((self.max_nodes, self.current_batch.x.size(1)), device=self.device)
+        x_padded[:self.current_batch.x.size(0)] = self.current_batch.x
 
-        return node_attention.numpy()
+        edge_index_padded = torch.zeros((2, self.max_edges), dtype=torch.int64, device=self.device)
+        edge_index_padded[:, :self.current_batch.edge_index.size(1)] = self.current_batch.edge_index
+
+        batch_padded = torch.zeros((self.max_nodes,), dtype=torch.int64, device=self.device)
+        batch_padded[:self.current_batch.batch.size(0)] = self.current_batch.batch
+
+        observation = {
+            'x': x_padded.cpu().numpy(),
+            'edge_index': edge_index_padded.cpu().numpy(),
+            'batch': batch_padded.cpu().numpy()
+        }
+
+        info = {
+            'num_graphs': self.current_batch.num_graphs,
+            'num_nodes': self.current_batch.x.size(0),
+            'num_edges': self.current_batch.edge_index.size(1),
+            'pred_similarity': pred_similarity.item(),
+            'sparsity': sparsity.item()
+        }
+
+        return observation, reward.item(), False, False, info
+
+""" Computes the max number of nodes and edges in any batch of the dataset. """
+def get_max_nodes_edges(dataloader, batch_size):
+    max_nodes = 0
+    max_edges = 0
+
+    for batch in dataloader:
+        num_nodes = batch.x.size(0)
+        num_edges = batch.edge_index.size(1)
+
+        max_nodes = max(max_nodes, num_nodes)
+        max_edges = max(max_edges, num_edges)
+
+    return max_nodes, max_edges

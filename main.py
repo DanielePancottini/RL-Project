@@ -103,9 +103,6 @@ train_dataset = normalize_dataset(train_dataset, mean, std)
 val_dataset = normalize_dataset(val_dataset, mean, std)
 test_dataset = normalize_dataset(test_dataset, mean, std)
 
-# Check if normalization was applied
-print("Normalized train dataset first example:", train_dataset[0], train_dataset[0].x)
-
 """
     Data Loaders Section
 """
@@ -115,6 +112,17 @@ batch_size = 128
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+"""
+    Test
+"""
+
+example_batch = next(iter(train_loader))
+
+print(example_batch)
+print(example_batch.x.size(0) + example_batch.edge_index.size(1))
+
+exit()
 
 """
     Model Section
@@ -155,3 +163,34 @@ print(f"Test Recall: {recall:.4f}")
 print(f"Test F1 Score: {f1:.4f}")
 print("Confusion Matrix:\n", conf_matrix)
 print(f"AUC-ROC: {auc_roc}")
+
+"""
+    PPO Agent Training
+
+
+ppo_model = train_interpretable_gnn(
+    gnn_model=your_baseline_gnn,
+    dataset=hiv_dataset,
+    batch_size=32,
+    num_steps=10000
+)
+
+# Assuming you have your baseline GNN model and data
+baseline_gnn = YourBaselineGNN()
+hiv_data = your_hiv_dataset
+
+# Train the interpretable model
+ppo_model = train_interpretable_gnn(
+    gnn_model=baseline_gnn,
+    train_data=hiv_data,
+    num_steps=10000
+)
+
+# Generate interpretation for a specific graph
+interpretation = generate_interpretation(
+    trained_ppo=ppo_model,
+    gnn_model=baseline_gnn,
+    data=hiv_data[0]  # for a single graph
+)
+
+"""
