@@ -1,18 +1,14 @@
 import torch
-
 from torch_geometric.datasets import MoleculeNet
 from torch_geometric.loader import DataLoader
 import torch_geometric.transforms as T
-
 from model import GNNWithAttention
-
 from sklearn.model_selection import train_test_split
-
 from train_gat import Trainer
-
 from collections import Counter
-
 import numpy as np
+from ppo import train_interpretable_gnn
+import os
 
 # Set Device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -109,20 +105,15 @@ test_dataset = normalize_dataset(test_dataset, mean, std)
 
 batch_size = 128
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False) #To be changed
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
 """
-    Test
+    TEST
 """
-
-example_batch = next(iter(train_loader))
-
-print(example_batch)
-print(example_batch.x.size(0) + example_batch.edge_index.size(1))
-
-exit()
+first_batch = next(iter(train_loader))
+print(first_batch)
 
 """
     Model Section
@@ -135,62 +126,55 @@ num_classes = dataset.num_classes
 heads = 8
 dropout = 0.3
 
-# Model & Optimizer
-model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
-
 """
     Training Section
 """
 
-# Train GNN
-trainer = Trainer(model, class_weights, device)
-trained_model = trainer.train(train_loader, val_loader)
+model_path = "./models/trained_model.pt"
 
-# Save the model
-torch.save(trained_model.state_dict(), "./models/trained_model.pt")
+# If already trained skip training
+if not os.path.exists(model_path):
 
-"""
-    Evaluation Section
-"""
+    # Model & Optimizer
+    model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
 
-# Evaluate the model on the test set
-accuracy, precision, recall, f1, conf_matrix, auc_roc = trainer.evaluate_metrics(test_loader)
+    # Train GNN
+    trainer = Trainer(model, class_weights, device)
+    trained_model = trainer.train(train_loader, val_loader)
 
-# Print metrics
-print(f"Test Accuracy: {accuracy:.4f}")
-print(f"Test Precision: {precision:.4f}")
-print(f"Test Recall: {recall:.4f}")
-print(f"Test F1 Score: {f1:.4f}")
-print("Confusion Matrix:\n", conf_matrix)
-print(f"AUC-ROC: {auc_roc}")
+    # Save the model
+    torch.save(trained_model.state_dict(), "./models/trained_model.pt")
+
+    """
+        Evaluation Section
+    """
+
+    # Evaluate the model on the test set
+    accuracy, precision, recall, f1, conf_matrix, auc_roc = trainer.evaluate_metrics(test_loader)
+
+    # Print metrics
+    print(f"Test Accuracy: {accuracy:.4f}")
+    print(f"Test Precision: {precision:.4f}")
+    print(f"Test Recall: {recall:.4f}")
+    print(f"Test F1 Score: {f1:.4f}")
+    print("Confusion Matrix:\n", conf_matrix)
+    print(f"AUC-ROC: {auc_roc}")
 
 """
     PPO Agent Training
+"""
 
-
-ppo_model = train_interpretable_gnn(
-    gnn_model=your_baseline_gnn,
-    dataset=hiv_dataset,
-    batch_size=32,
-    num_steps=10000
-)
+model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
+model.load_state_dict(torch.load("./models/trained_model.pt", weights_only=True))
+model.eval()
 
 # Assuming you have your baseline GNN model and data
-baseline_gnn = YourBaselineGNN()
-hiv_data = your_hiv_dataset
+baseline_gnn = model
+ppo_training_dataloader = train_loader
 
-# Train the interpretable model
-ppo_model = train_interpretable_gnn(
-    gnn_model=baseline_gnn,
-    train_data=hiv_data,
-    num_steps=10000
+trained_ppo = train_interpretable_gnn(
+    baseline_gnn,
+    ppo_training_dataloader,
+    batch_size = batch_size,
+    device = 'cuda'
 )
-
-# Generate interpretation for a specific graph
-interpretation = generate_interpretation(
-    trained_ppo=ppo_model,
-    gnn_model=baseline_gnn,
-    data=hiv_data[0]  # for a single graph
-)
-
-"""

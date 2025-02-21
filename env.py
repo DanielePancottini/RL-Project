@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import numpy as np
 
@@ -20,14 +21,14 @@ class GNNInterpretEnvironment(gym.Env):
         # Get max nodes/edges across over the possible batches
         # We can define fixed action and obeservation spaces
 
-        self.max_nodes, self.max_edges = get_max_nodes_edges(dataloader, batch_size)
+        self.max_nodes, self.max_edges = get_max_nodes_edges(dataloader)
        
         # Action space: continuous values between 0 and 1 for each node and edge
         # Will be truncated to match actual batch size during step()
         self.action_space = spaces.Box(
             low=0,
             high=1,
-            shape=(self.max_nodes + self.max_edges,),
+            shape=(self.max_nodes + self.max_edges, ),
             dtype=np.float32
         )
         
@@ -39,7 +40,7 @@ class GNNInterpretEnvironment(gym.Env):
             'x': spaces.Box(
                 low=-np.inf,
                 high=np.inf,
-                shape=(self.max_nodes, example_batch.shape[1]),
+                shape=(self.max_nodes, example_batch.x.shape[1]),
                 dtype=np.float32
             ),
             'edge_index': spaces.Box(
@@ -101,7 +102,7 @@ class GNNInterpretEnvironment(gym.Env):
         node_mask = torch.tensor(action[:num_nodes], device=self.device)
         edge_mask = torch.tensor(action[num_nodes:num_nodes + num_edges], device=self.device)
         
-        # Apply masks
+        # Apply masks and compute predictions for the batch
         masked_x = self.current_batch.x * node_mask.unsqueeze(-1)
         masked_edge_index = self.current_batch.edge_index[:, edge_mask > 0.5]
         
@@ -118,7 +119,7 @@ class GNNInterpretEnvironment(gym.Env):
             masked_pred = self.gnn_model(masked_batch)
         
         # Compute reward
-        pred_similarity = -nn.F.mse_loss(masked_pred, original_pred)
+        pred_similarity = -F.mse_loss(masked_pred, original_pred)
         sparsity = -(node_mask.mean() + edge_mask.mean()) * 0.1
         reward = pred_similarity + sparsity
         
@@ -126,10 +127,13 @@ class GNNInterpretEnvironment(gym.Env):
         try:
             self.current_batch = next(self.data_iter)
         except StopIteration:
+            print("EXCEPTION")
             self.data_iter = iter(self.dataloader)
             self.current_batch = next(self.data_iter)
             
         self.current_batch = self.current_batch.to(self.device)
+        print(f"Graph has {self.current_batch.x.size(0)} nodes")
+
         
         # Pad next batch
         x_padded = torch.zeros((self.max_nodes, self.current_batch.x.size(1)), device=self.device)
@@ -158,11 +162,12 @@ class GNNInterpretEnvironment(gym.Env):
         return observation, reward.item(), False, False, info
 
 """ Computes the max number of nodes and edges in any batch of the dataset. """
-def get_max_nodes_edges(dataloader, batch_size):
+def get_max_nodes_edges(dataloader):
     max_nodes = 0
     max_edges = 0
 
     for batch in dataloader:
+        print(f"Batch has {batch.x.size(0)} nodes, {batch.edge_index.size(1)} edges")
         num_nodes = batch.x.size(0)
         num_edges = batch.edge_index.size(1)
 

@@ -8,3 +8,4 @@ torch_scatter
 stable_baselines3
 rdkit
 deepchem
+git+https://github.com/adysonmaia/sb3-plus#egg=sb3-plus

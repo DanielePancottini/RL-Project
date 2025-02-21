@@ -4,125 +4,110 @@ import torch.nn.functional as F
 from torch.distributions import Beta
 from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
-from torch_geometric.nn import GCNConv, global_mean_pool
-from typing import Dict, List, Optional, Tuple, Type, Union
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from env import GNNInterpretEnvironment
+from torch_geometric.nn import GATConv, global_mean_pool
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from gymnasium import spaces
 
-class GNNPolicy(ActorCriticPolicy):
-    """Custom policy network that can process graph data"""
+class GNNFeatureExtractor(BaseFeaturesExtractor):
+    """
+    Custom GNN feature extractor using Graph Attention Networks (GAT).
+    """
+    def __init__(self, observation_space: spaces.Dict, hidden_dim: int = 64, heads: int = 4):
+        super(GNNFeatureExtractor, self).__init__(observation_space, hidden_dim)
+
+        self.hidden_dim = hidden_dim
+        input_dim = observation_space.spaces["x"].shape[1]
+
+        # GAT layers
+        self.gat1 = GATConv(input_dim, hidden_dim, heads=heads, concat=True)  # Attention layer 1
+        self.gat2 = GATConv(hidden_dim * heads, hidden_dim, heads=1, concat=False)  # Attention layer 2
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim * int(observation_space.spaces["batch"].high_repr), hidden_dim),
+            nn.ReLU()
+        )
+
+        print(f"MLP Size: {hidden_dim * int(observation_space.spaces['batch'].high_repr)}")
+        print("Observation space batch size: ", observation_space.spaces["batch"].high_repr)
+
+    def forward(self, observations: dict) -> torch.Tensor:
+
+        """
+        Extract meaningful graph embeddings.
+        """
+        x = observations["x"].to(torch.float32).squeeze()  # Node features
+        edge_index = observations["edge_index"].to(torch.int64).squeeze()  # Edge indices
+        batch = observations["batch"].to(torch.int64).squeeze()  # Batch mapping
+
+        # Apply GAT layers with attention
+        h = F.elu(self.gat1(x, edge_index))
+        h = F.elu(self.gat2(h, edge_index))
+
+        # Global mean pooling to obtain a fixed-size graph representation
+        graph_embedding = global_mean_pool(h, batch)
+        graph_embedding = graph_embedding.view(-1)
+
+        return self.mlp(graph_embedding)  # Return processed features
+
+class GNNActorCriticNetwork(nn.Module):
+    """
+    Custom Actor-Critic Network using GAT-based feature extractor.
+    """
+    def __init__(self, action_space):
+        super().__init__()
+
+        # IMPORTANT:
+        # Save output dimensions, used to create the distributions
+        self.latent_dim_pi = action_space.shape[0]
+        self.latent_dim_vf = 1
+
+        # Unified policy network
+        self.policy_net = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.latent_dim_pi),  # Output action size
+            nn.ReLU()
+        )
+
+        # Value network
+        self.value_net = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, self.latent_dim_vf),
+            nn.ReLU()
+        )
+
+    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.policy_net(features), self.value_net(features)
+
+class GNNActorCriticPolicy(ActorCriticPolicy):
     def __init__(
         self,
-        observation_space,
-        action_space,
-        lr_schedule,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        lr_schedule: Callable[[float], float],
         *args,
-        **kwargs
+        **kwargs,
     ):
+        # Disable orthogonal initialization
+        kwargs["ortho_init"] = False
         super().__init__(
             observation_space,
             action_space,
             lr_schedule,
+            # Pass remaining arguments to base class
             *args,
-            **kwargs
-        )
-        
-        # Get feature dimensions from observation space
-        self.input_dim = observation_space['x'].shape[1]
-        self.hidden_dim = 64
-        
-        # GNN layers
-        self.conv1 = GCNConv(self.input_dim, self.hidden_dim)
-        self.conv2 = GCNConv(self.hidden_dim, self.hidden_dim)
-        
-        # MLP for node scores
-        self.node_policy = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, 1)
-        )
-        
-        # MLP for edge scores
-        self.edge_policy = nn.Sequential(
-            nn.Linear(2 * self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, 1)
-        )
-        
-        # Value function
-        self.value_net = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(self.hidden_dim, 1)
+            **kwargs,
+            features_extractor_class=GNNFeatureExtractor,
+            features_extractor_kwargs={"hidden_dim": 64, "heads": 4}
         )
 
-    def forward_gnn(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Process the graph data through GNN layers"""
-        x = obs['x'].to(self.device)
-        edge_index = obs['edge_index'].to(self.device)
-        batch = obs['batch'].to(self.device)
-        
-        # GNN layers
-        h = F.relu(self.conv1(x, edge_index))
-        h = F.relu(self.conv2(h, edge_index))
-        
-        return h, batch
 
-    def forward(self, 
-        obs: Dict[str, torch.Tensor],
-        deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Forward pass of the policy
-        Returns: actions, values, log_probs
-        """
-        # Convert numpy arrays to tensors
-        obs_tensors = {
-            'x': torch.FloatTensor(obs['x']).to(self.device),
-            'edge_index': torch.LongTensor(obs['edge_index']).to(self.device),
-            'batch': torch.LongTensor(obs['batch']).to(self.device)
-        }
-        
-        # Get node embeddings
-        h, batch = self.forward_gnn(obs_tensors)
-        
-        # Get node scores
-        node_scores = self.node_policy(h).squeeze(-1)
-        
-        # Get edge scores
-        row, col = obs_tensors['edge_index']
-        edge_features = torch.cat([h[row], h[col]], dim=1)
-        edge_scores = self.edge_policy(edge_features).squeeze(-1)
-        
-        # Combine node and edge scores
-        actions_raw = torch.cat([node_scores, edge_scores])
-        
-        # Use Beta distribution for valid probability range (0,1)
-        alpha = F.softplus(actions_raw) + 1
-        beta = F.softplus(-actions_raw) + 1
-
-        dist = Beta(alpha, beta)
-        actions = dist.mean if deterministic else dist.sample()
-        log_probs = dist.log_prob(actions).sum(dim=-1)
-
-        # Compute value function
-        graph_embedding = global_mean_pool(h, batch)
-        values = self.value_net(graph_embedding).squeeze(-1)
-
-        return actions.detach().cpu().numpy(), values.detach().cpu().numpy(), log_probs.detach().cpu().numpy()
-
-
-    def predict_values(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute value function prediction"""
-        obs_tensors = {
-            'x': torch.FloatTensor(obs['x']).to(self.device),
-            'edge_index': torch.LongTensor(obs['edge_index']).to(self.device),
-            'batch': torch.LongTensor(obs['batch']).to(self.device)
-        }
-        
-        h, batch = self.forward_gnn(obs_tensors)
-        graph_embedding = global_mean_pool(h, batch)
-        values = self.value_net(graph_embedding).squeeze(-1)
-        
-        return values
+    def _build_mlp_extractor(self) -> None:
+        self.mlp_extractor = GNNActorCriticNetwork(self.action_space)
 
 def train_interpretable_gnn(
     gnn_model,
@@ -133,11 +118,11 @@ def train_interpretable_gnn(
     device: str = 'cuda'
 ):
     
-    env = DummyVecEnv([lambda: GNNInterpretEnvironment(gnn_model, dataloader, batch_size, device)])
+    env = GNNInterpretEnvironment(gnn_model, dataloader, batch_size, device)
 
     # Initialize PPO with custom policy
     model = PPO(
-        policy=GNNPolicy,
+        policy=GNNActorCriticPolicy,
         env=env,
         learning_rate=learning_rate,
         n_steps=batch_size * 4,  # Number of steps per update
@@ -161,5 +146,10 @@ def train_interpretable_gnn(
         total_timesteps=total_timesteps,
         log_interval=10
     )
-    
+
+    obs, _ = env.reset()
+    action, _states = model.predict(obs)
+
+    print(action.shape)
+
     return model
