@@ -88,16 +88,14 @@ class GNNActorCriticNetwork(nn.Module):
         self.policy_net = nn.Sequential(
             nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(32, self.latent_dim_pi),  # Output action size
-            nn.ReLU()
+            nn.Linear(32, self.latent_dim_pi)  # Output action size
         )
 
         # Value network
         self.value_net = nn.Sequential(
             nn.Linear(64, 32),
             nn.ReLU(),
-            nn.Linear(32, self.latent_dim_vf),
-            nn.ReLU()
+            nn.Linear(32, self.latent_dim_vf)
         )
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
