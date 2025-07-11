@@ -56,8 +56,14 @@ balanced_labels = [data.y.item() for data in balanced_dataset]
 # Count class occurrences
 class_counts = Counter(balanced_labels)
 
-# Class weights 
-class_weights = torch.tensor([len(dataset)/(2*count) for _, count in class_counts.items()]).to(device)
+# Class weights for loss function, calculated based on the balanced dataset
+class_weights_list = [0.0] * dataset.num_classes # Initialize for all possible classes
+for cls, count in class_counts.items():
+    if count > 0:
+        # Use len(balanced_dataset) for the total count in the balanced dataset
+        class_weights_list[int(cls)] = len(balanced_dataset) / (dataset.num_classes * count)
+
+class_weights = torch.tensor(class_weights_list).to(device)
 
 # Print class balances in one line
 print("HIV Class Balances: " + ", ".join([f"Class {cls}: {count}" for cls, count in class_counts.items()]))
@@ -105,7 +111,7 @@ test_dataset = normalize_dataset(test_dataset, mean, std)
 
 batch_size = 128
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=True) 
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True) 
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -165,7 +171,7 @@ if not os.path.exists(model_path):
 """
 
 model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
-model.load_state_dict(torch.load("./models/trained_model.pt", weights_only=True))
+model.load_state_dict(torch.load("./models/trained_model.pt"))
 model.eval()
 
 # Assuming you have your baseline GNN model and data
@@ -176,5 +182,5 @@ trained_ppo = train_interpretable_gnn(
     baseline_gnn,
     ppo_training_dataloader,
     batch_size = batch_size,
-    device = 'cuda'
+    device = device
 )
