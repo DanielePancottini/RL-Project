@@ -49,12 +49,8 @@ class GNNInterpretEnvironment(gym.Env):
                 shape=(2, self.max_edges),
                 dtype=np.int64
             ),
-            'batch': spaces.Box(
-                low=0,
-                high=batch_size,
-                shape=(self.max_nodes,),
-                dtype=np.int64
-            )
+            'num_nodes': spaces.Discrete(self.max_nodes + 1),
+            'num_edges': spaces.Discrete(self.max_edges + 1)
         })
     
     def reset(self, seed=None):
@@ -71,7 +67,6 @@ class GNNInterpretEnvironment(gym.Env):
         self.current_batch = self.current_batch.to(self.device)
         print(f"Graph has {self.current_batch.x.size(0)} nodes")
 
-
         # Pad data to max_nodes / max_edges
         x_padded = torch.zeros((self.max_nodes, self.current_batch.x.size(1)), device=self.device)
         x_padded[:self.current_batch.x.size(0)] = self.current_batch.x
@@ -79,13 +74,11 @@ class GNNInterpretEnvironment(gym.Env):
         edge_index_padded = torch.zeros((2, self.max_edges), dtype=torch.int64, device=self.device)
         edge_index_padded[:, :self.current_batch.edge_index.size(1)] = self.current_batch.edge_index
 
-        batch_padded = torch.zeros((self.max_nodes,), dtype=torch.int64, device=self.device)
-        batch_padded[:self.current_batch.batch.size(0)] = self.current_batch.batch
-
         observation = {
             'x': x_padded.cpu().numpy(),
             'edge_index': edge_index_padded.cpu().numpy(),
-            'batch': batch_padded.cpu().numpy()
+            'num_nodes': self.current_batch.x.size(0),
+            'num_edges': self.current_batch.edge_index.size(1)
         }
 
         info = {
@@ -107,7 +100,8 @@ class GNNInterpretEnvironment(gym.Env):
         
         # Apply masks and compute predictions for the batch
         masked_x = self.current_batch.x * node_mask.unsqueeze(-1)
-        masked_edge_index = self.current_batch.edge_index[:, edge_mask > 0.5]
+        masked_edge_indices_to_keep = (edge_mask > 0.5).nonzero(as_tuple=True)[0]
+        masked_edge_index = self.current_batch.edge_index[:, masked_edge_indices_to_keep]
         
         # Create masked batch
         masked_batch = Data(
@@ -144,13 +138,11 @@ class GNNInterpretEnvironment(gym.Env):
         edge_index_padded = torch.zeros((2, self.max_edges), dtype=torch.int64, device=self.device)
         edge_index_padded[:, :self.current_batch.edge_index.size(1)] = self.current_batch.edge_index
 
-        batch_padded = torch.zeros((self.max_nodes,), dtype=torch.int64, device=self.device)
-        batch_padded[:self.current_batch.batch.size(0)] = self.current_batch.batch
-
         observation = {
             'x': x_padded.cpu().numpy(),
             'edge_index': edge_index_padded.cpu().numpy(),
-            'batch': batch_padded.cpu().numpy()
+            'num_nodes': self.current_batch.x.size(0),
+            'num_edges': self.current_batch.edge_index.size(1) 
         }
 
         info = {

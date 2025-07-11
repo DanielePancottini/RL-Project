@@ -41,9 +41,9 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         """
         Extract meaningful graph embeddings.
         """
-        x = observations["x"].to(torch.float32).squeeze()  # Node features
-        edge_index = observations["edge_index"].to(torch.int64).squeeze()  # Edge indices
-        batch = observations["batch"].to(torch.int64).squeeze()  # Batch mapping
+        x = observations["x"].to(torch.float32) # Node features
+        edge_index = observations["edge_index"].to(torch.int64)  # Edge indices
+        batch = observations["batch"].to(torch.int64)  # Batch mapping
 
           # Check for NaNs or Infs in inputs
         assert not torch.isnan(x).any(), "NaN detected in node features (x)!"
