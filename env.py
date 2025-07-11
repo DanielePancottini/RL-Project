@@ -64,10 +64,13 @@ class GNNInterpretEnvironment(gym.Env):
         try:
             self.current_batch = next(self.data_iter)
         except StopIteration:
+            print("EXCEPTION")
             self.data_iter = iter(self.dataloader)
             self.current_batch = next(self.data_iter)
         
         self.current_batch = self.current_batch.to(self.device)
+        print(f"Graph has {self.current_batch.x.size(0)} nodes")
+
 
         # Pad data to max_nodes / max_edges
         x_padded = torch.zeros((self.max_nodes, self.current_batch.x.size(1)), device=self.device)
@@ -119,7 +122,7 @@ class GNNInterpretEnvironment(gym.Env):
             masked_pred = self.gnn_model(masked_batch)
         
         # Compute reward
-        pred_similarity = -F.mse_loss(masked_pred, original_pred)
+        pred_similarity = -F.cross_entropy(masked_pred, original_pred.argmax(dim=1))
         sparsity = -(node_mask.mean() + edge_mask.mean()) * 0.1
         reward = pred_similarity + sparsity
         
@@ -133,7 +136,6 @@ class GNNInterpretEnvironment(gym.Env):
             
         self.current_batch = self.current_batch.to(self.device)
         print(f"Graph has {self.current_batch.x.size(0)} nodes")
-
         
         # Pad next batch
         x_padded = torch.zeros((self.max_nodes, self.current_batch.x.size(1)), device=self.device)

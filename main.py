@@ -105,7 +105,7 @@ test_dataset = normalize_dataset(test_dataset, mean, std)
 
 batch_size = 128
 
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False) #To be changed
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=True) #To be changed
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
