@@ -8,6 +8,7 @@ from train_gat import Trainer
 from collections import Counter
 import numpy as np
 from ppo import train_interpretable_gnn
+from utils import get_max_nodes_edges_from_dataset 
 import os
 
 # Set Device
@@ -170,17 +171,43 @@ if not os.path.exists(model_path):
     PPO Agent Training
 """
 
+# Compute max nodes and max edges
+print("Calculating max nodes and edges across the entire dataset for environment padding...")
+max_nodes_dataset, max_edges_dataset, node_feature_dim_dataset = get_max_nodes_edges_from_dataset(balanced_dataset)
+print(f"Global Max Nodes (from dataset): {max_nodes_dataset}, Global Max Edges (from dataset): {max_edges_dataset}, Node Feature Dim: {node_feature_dim_dataset}")
+
+
+# Define PPO DataLoaders
+env_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=False)
+
 model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
 model.load_state_dict(torch.load("./models/trained_model.pt"))
 model.eval()
 
 # Assuming you have your baseline GNN model and data
 baseline_gnn = model
-ppo_training_dataloader = train_loader
 
+"""
 trained_ppo = train_interpretable_gnn(
     baseline_gnn,
     ppo_training_dataloader,
     batch_size = batch_size,
     device = device
 )
+"""
+
+# Define the number of parallel environments for Stable-Baselines3's VecEnv
+ppo_n_envs = 64 # Or 128, etc., depending on your resources. This is 'n_envs' for SB3.
+
+trained_ppo_model = train_interpretable_gnn(
+    baseline_gnn, # Your pre-trained GNN model
+    env_dataloader, # The DataLoader with batch_size=1 for the environments
+    n_envs = ppo_n_envs, # Number of parallel environments
+    max_nodes = max_nodes_dataset, # Max nodes for observation padding
+    max_edges = max_edges_dataset, # Max edges for observation padding
+    node_feature_dim = node_feature_dim_dataset, # Node feature dimension for observation
+    device = device,
+    max_episode_steps = 50 # Example: set a max_steps_per_episode for the RL agent
+)
+
+print("\nPPO Agent Training Complete.")

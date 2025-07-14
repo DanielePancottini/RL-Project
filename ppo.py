@@ -3,14 +3,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Beta
 from stable_baselines3 import PPO
-from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.policies import ActorCriticPolicy 
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.distributions import DiagGaussianDistribution
 from env import GNNInterpretEnvironment
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data, Batch
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Type
 from gymnasium import spaces
 
 class GNNFeatureExtractor(BaseFeaturesExtractor):
@@ -21,6 +21,7 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         super(GNNFeatureExtractor, self).__init__(observation_space, hidden_dim)
 
         self.hidden_dim = hidden_dim
+        self.heads = heads
         input_dim = observation_space.spaces["x"].shape[1]
 
         # GAT layers
@@ -34,6 +35,8 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
 
     def forward(self, observations: dict) -> torch.Tensor:
 
+        print(f"FeatureExtractor DEBUG: observations['num_nodes'] received shape: {observations['num_nodes'].shape}")
+
         """
         Extract meaningful graph embeddings.
         """
@@ -42,11 +45,13 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         list_of_data = []
 
         for i in range(batch_size_sb3):
-            num_nodes = observations["num_nodes"][i].item()
-            num_edges = observations["num_edges"][i].item()
+            print(f"FeatureExtractor DEBUG: observations['num_nodes'][{i}] shape before .item(): {observations['num_nodes'][i].shape}")
+            num_nodes = int(observations["num_nodes"][i].item())
+            num_edges = int(observations["num_edges"][i].item())
             
             x_i = observations["x"][i, :num_nodes, :].contiguous()
             edge_index_i = observations["edge_index"][i, :, :num_edges].contiguous()
+            edge_index_i = edge_index_i.to(torch.long)
 
             # Handle case where a graph has no edges
             if edge_index_i.numel() == 0:
@@ -70,7 +75,6 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         
         # Apply GAT layers with attention
         h = self.gat1(x, edge_index)
-        print("Output after GAT1 before activation:", h)
         assert not torch.isnan(h).any(), "NaN detected after GAT1!"
 
         h = self.layer_norm1(h)  # Normalize after GAT1
@@ -98,7 +102,7 @@ class GNNActorCriticNetwork(nn.Module):
 
         # IMPORTANT:
         # Save output dimensions, used to create the distributions
-        self.latent_dim_pi = action_space.shape[0]
+        self.latent_dim_pi = action_space.n
         self.latent_dim_vf = 1
 
         # Policy network
@@ -153,7 +157,11 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
             self.log_std = nn.Parameter(torch.zeros(self.action_space.shape[0], dtype=torch.float32))
         else:
             # For discrete action spaces, this parameter is not needed
-            self.log_std = None
+            # self.log_std = None
+            # For discrete action spaces, this parameter is not needed,
+            # but SB3's logger currently expects a Tensor.
+            # Setting a dummy parameter to avoid the TypeError.
+            self.log_std = nn.Parameter(torch.tensor([0.0], dtype=torch.float32, device=self.device))
 
     def _build_mlp_extractor(self) -> None:
         # Get the feature dimension from the already initialized features_extractor
@@ -183,16 +191,6 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         
         return values, log_prob, entropy
 
-    def _get_action_dist_from_latent(self, latent_pi: torch.Tensor) -> DiagGaussianDistribution:
-        mean_actions = latent_pi
-        
-        # For continuous actions, use the learned log_std
-        # Clamp for numerical stability: log_std usually clamped between -20 and 2
-        log_std = self.log_std.expand_as(mean_actions).clamp(min=-20.0, max=2.0)
-        std_actions = torch.exp(log_std)
-        
-        return DiagGaussianDistribution(mean_actions, std_actions)
-
     def forward(self, obs: Dict[str, torch.Tensor], deterministic: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass in the policy.
@@ -207,11 +205,11 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
         # Latent policy and value from your custom actor-critic network
         latent_pi, latent_vf = self.mlp_extractor(features)
 
-        # Create the action distribution
-        distribution = self._get_action_dist_from_latent(latent_pi)
-
-        # Sample action (or use deterministic)
-        actions = distribution.get_actions(deterministic=deterministic)
+        distribution = torch.distributions.Categorical(logits=latent_pi)
+        if deterministic:
+            actions = torch.argmax(distribution.logits, dim=-1)
+        else:
+            actions = distribution.sample()
         
         # Calculate log probability of the sampled actions
         log_prob = distribution.log_prob(actions)
@@ -221,55 +219,48 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
 
         return actions, values, log_prob
 
-def train_interpretable_gnn(
-    gnn_model,
-    dataloader,
-    batch_size: int = 32,
-    total_timesteps: int = 10000,
-    learning_rate: float = 1e-4,
-    device: str = 'cuda'
-):
-    # Create a function that returns an environment instance
-    def make_env():
-        return GNNInterpretEnvironment(gnn_model, dataloader, batch_size, device)
+def train_interpretable_gnn(baseline_gnn, env_dataloader, n_envs, max_nodes, max_edges, node_feature_dim, device, max_episode_steps):
+    
+    # Create the vectorized environment
+    env = DummyVecEnv([
+        lambda: GNNInterpretEnvironment(
+            gnn_model=baseline_gnn,
+            single_graph_dataloader=env_dataloader,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+            node_feature_dim=node_feature_dim,
+            device=device,
+            max_steps_per_episode=max_episode_steps # Pass to environment
+        )
+        for _ in range(n_envs)
+    ])
 
-    # Wrap the environment in a DummyVecEnv
-    env = DummyVecEnv([lambda: GNNInterpretEnvironment(gnn_model, dataloader, 1, device)] * batch_size) 
-
+    
     # Initialize PPO with custom policy
     model = PPO(
-        policy=GNNActorCriticPolicy,
+        policy=GNNActorCriticPolicy, # ⭐ IMPORTANT: Use your custom policy here! ⭐
         env=env,
-        learning_rate=learning_rate,
-        n_steps=2048,  # Number of steps per update
-        batch_size=64,   # PPO batch size
-        n_epochs=10,             # Number of epochs when optimizing the surrogate loss
-        gamma=0.99,             # Discount factor
-        gae_lambda=0.95,        # Factor for trade-off of bias vs variance for GAE
-        clip_range=0.2,         # Clipping parameter for PPO
-        clip_range_vf=None,     # Clipping parameter for the value function
-        ent_coef=0.01,          # Entropy coefficient for exploration
-        vf_coef=0.5,            # Value function coefficient
-        max_grad_norm=0.5,      # Maximum norm for gradient clipping
-        use_sde=False,          # Whether to use generalized State Dependent Exploration
-        sde_sample_freq=-1,     # Sample a new noise matrix every n steps
-        verbose=1,
-        device=device,
-        policy_kwargs=dict(
-            features_extractor_class=GNNFeatureExtractor,
-            features_extractor_kwargs=dict(hidden_dim=64, heads=4)
+        learning_rate=3e-4, # Use the passed learning_rate
+        n_steps=64,               # Number of steps collected per environment before update
+        batch_size=256,             # Minibatch size for SGD updates during policy training
+        n_epochs=10,                # Number of epochs for PPO updates per rollout
+        gamma=0.99,                 # Discount factor
+        gae_lambda=0.95,            # GAE parameter
+        clip_range=0.2,             # PPO clipping range
+        ent_coef=0.01,              # Entropy coefficient for exploration
+        vf_coef=0.5,                # Value function coefficient
+        max_grad_norm=0.5,          # Max gradient norm for clipping
+        tensorboard_log="./ppo_tensorboard/",
+        verbose=1,                  # Verbosity level (1 for training progress)
+        device=device,              # Device for computations ('cpu' or 'cuda')
+        policy_kwargs=dict(         # Pass arguments to your custom policy's __init__
+            features_extractor_class=GNNFeatureExtractor, # Specify your GNN feature extractor
+            features_extractor_kwargs=dict(hidden_dim=64, heads=4) # Pass args to GNNFeatureExtractor
         )
     )
     
-    # Train the model
-    model.learn(
-        total_timesteps=total_timesteps,
-        log_interval=1
-    )
-
-    obs, _ = env.reset()
-    action, _states = model.predict(obs)
-
-    print(action.shape) # This will be (n_envs, action_space_dim)
+    print(f"PPO Model created. Training for {model._total_timesteps} timesteps...")
+    # total_timesteps refers to the total number of environment steps (sum across all environments)
+    model.learn(total_timesteps=50000) # Example: Train for 500k environment steps
 
     return model
