@@ -1,12 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Beta
 from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy 
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.distributions import DiagGaussianDistribution
 from env import GNNInterpretEnvironment
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.data import Data, Batch
@@ -22,7 +20,10 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
 
         self.hidden_dim = hidden_dim
         self.heads = heads
-        input_dim = observation_space.spaces["x"].shape[1]
+        
+        #input_dim = node features + node mask + is starting node mask
+        node_features_dim = observation_space.spaces["x"].shape[1]
+        input_dim = node_features_dim + 1 + 1
 
         # GAT layers
         self.gat1 = GATConv(input_dim, hidden_dim, heads=heads, concat=True)  # Attention layer 1
@@ -34,45 +35,50 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
         print(f"GNNFeatureExtractor will output features of dimension: {self._features_dim}")
 
     def forward(self, observations: dict) -> torch.Tensor:
-
-        print(f"FeatureExtractor DEBUG: observations['num_nodes'] received shape: {observations['num_nodes'].shape}")
-
         """
         Extract meaningful graph embeddings.
         """
         # Reconstruct PyG batch
-        batch_size_sb3 = observations["x"].shape[0]
-        list_of_data = []
+        with torch.no_grad():
+            batch_size_sb3 = observations["x"].shape[0]
+            list_of_data = []
 
-        for i in range(batch_size_sb3):
-            print(f"FeatureExtractor DEBUG: observations['num_nodes'][{i}] shape before .item(): {observations['num_nodes'][i].shape}")
-            num_nodes = int(observations["num_nodes"][i].item())
-            num_edges = int(observations["num_edges"][i].item())
-            
-            x_i = observations["x"][i, :num_nodes, :].contiguous()
-            edge_index_i = observations["edge_index"][i, :, :num_edges].contiguous()
-            edge_index_i = edge_index_i.to(torch.long)
+            for i in range(batch_size_sb3):
+                num_nodes = int(observations["num_nodes"][i].item())
+                num_edges = int(observations["num_edges"][i].item())
+                
+                x_i = observations["x"][i, :num_nodes, :].contiguous()
 
-            # Handle case where a graph has no edges
-            if edge_index_i.numel() == 0:
-                edge_index_i = torch.empty((2, 0), dtype=torch.long, device=x_i.device)
+                # Extract and unpad node_mask and is_start_node_mask, then unsqueeze to [num_nodes, 1]
+                node_mask_i = observations["node_mask"][i, :num_nodes].unsqueeze(1).contiguous()
+                is_start_node_mask_i = observations["is_start_node_mask"][i, :num_nodes].unsqueeze(1).contiguous()
 
-            list_of_data.append(Data(x=x_i, edge_index=edge_index_i))
+                # Concatenate all node-level features for the GNN input
+                x_augmented_i = torch.cat([x_i, node_mask_i, is_start_node_mask_i], dim=-1)
 
-        # Create a single PyTorch Geometric Batch from the list of Data objects
-        pyg_batch = Batch.from_data_list(list_of_data)
+                # Extract and unpad edge_index
+                edge_index_i = observations["edge_index"][i, :, :num_edges].contiguous()
+                edge_index_i = edge_index_i.to(torch.long)
 
-        # Extract components for GNN layers
-        x, edge_index, batch_map = pyg_batch.x, pyg_batch.edge_index, pyg_batch.batch
+                # Handle case where a graph has no edges
+                if edge_index_i.numel() == 0:
+                    edge_index_i = torch.empty((2, 0), dtype=torch.long, device=x_i.device)
 
-        # ❗ CHANGE 4: Move input assertions to after PyG batch construction ❗
-        assert not torch.isnan(x).any(), "NaN detected in node features (x)!"
-        assert not torch.isinf(x).any(), "Inf detected in node features (x)!"
-        # Check edge_index values against the node count in the _combined_ batch
-        assert (edge_index >= 0).all(), "Negative indices detected in edge_index!"
-        assert (edge_index < x.shape[0]).all(), "Invalid indices in edge_index!"
+                list_of_data.append(Data(x=x_augmented_i, edge_index=edge_index_i))
 
-        
+            # Create a single PyTorch Geometric Batch from the list of Data objects
+            pyg_batch = Batch.from_data_list(list_of_data)
+
+            # Extract components for GNN layers
+            x, edge_index, batch_map = pyg_batch.x, pyg_batch.edge_index, pyg_batch.batch
+
+            # ❗ CHANGE 4: Move input assertions to after PyG batch construction ❗
+            assert not torch.isnan(x).any(), "NaN detected in node features (x)!"
+            assert not torch.isinf(x).any(), "Inf detected in node features (x)!"
+            # Check edge_index values against the node count in the _combined_ batch
+            assert (edge_index >= 0).all(), "Negative indices detected in edge_index!"
+            assert (edge_index < x.shape[0]).all(), "Invalid indices in edge_index!"
+
         # Apply GAT layers with attention
         h = self.gat1(x, edge_index)
         assert not torch.isnan(h).any(), "NaN detected after GAT1!"
@@ -87,7 +93,6 @@ class GNNFeatureExtractor(BaseFeaturesExtractor):
 
         # Global mean pooling to obtain a fixed-size graph representation
         graph_embeddings = global_mean_pool(h, batch_map) # [batch_size_sb3, self.hidden_dim]
-
 
         assert not torch.isnan(graph_embeddings).any(), "NaN detected in graph_embedding!"
 
@@ -107,16 +112,22 @@ class GNNActorCriticNetwork(nn.Module):
 
         # Policy network
         self.policy_net = nn.Sequential(
-            nn.Linear(features_dim, 32),
+            nn.Linear(features_dim, 512),
+            nn.LayerNorm(512),
+            nn.Dropout(0.1),
             nn.ReLU(),
-            nn.Linear(32, self.latent_dim_pi)  # Output action size
+            nn.Linear(512, self.latent_dim_pi)
         )
 
         # Value network
         self.value_net = nn.Sequential(
-            nn.Linear(features_dim, 32),
+            nn.Linear(features_dim, 512),
+            nn.LayerNorm(512),
+            nn.Dropout(0.1),
             nn.ReLU(),
-            nn.Linear(32, self.latent_dim_vf)
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, self.latent_dim_vf)
         )
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -172,22 +183,16 @@ class GNNActorCriticPolicy(ActorCriticPolicy):
 
 
     def evaluate_actions(self, obs: Dict[str, torch.Tensor], actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Get latent features (graph embeddings) from the feature extractor
         features = self.features_extractor(obs)
-        
-        # Get latent policy and value (output of your GNNActorCriticNetwork's MLPs)
-        latent_pi, latent_vf = self.mlp_extractor(features) # Call the custom network
+        latent_pi, latent_vf = self.mlp_extractor(features)
 
-        # Create the action distribution
-        # _get_action_dist_from_latent is a method of the base ActorCriticPolicy
-        distribution = self._get_action_dist_from_latent(latent_pi)
+        # For discrete action spaces, use Categorical distribution
+        distribution = torch.distributions.Categorical(logits=latent_pi)
 
-        # Calculate log_prob and entropy
         log_prob = distribution.log_prob(actions)
         entropy = distribution.entropy()
         
-        # Get the value estimates (output from value_net)
-        values = self.mlp_extractor.forward_critic(features).squeeze(1) # Ensure values is [batch_size]
+        values = self.mlp_extractor.forward_critic(features).squeeze(1)
         
         return values, log_prob, entropy
 
@@ -228,39 +233,41 @@ def train_interpretable_gnn(baseline_gnn, env_dataloader, n_envs, max_nodes, max
             single_graph_dataloader=env_dataloader,
             max_nodes=max_nodes,
             max_edges=max_edges,
-            node_feature_dim=node_feature_dim,
+            node_features_dim=node_feature_dim,
             device=device,
             max_steps_per_episode=max_episode_steps # Pass to environment
         )
         for _ in range(n_envs)
     ])
 
+    env = VecNormalize(env, norm_obs=False, norm_reward=True)
     
     # Initialize PPO with custom policy
     model = PPO(
         policy=GNNActorCriticPolicy, # ⭐ IMPORTANT: Use your custom policy here! ⭐
         env=env,
-        learning_rate=3e-4, # Use the passed learning_rate
-        n_steps=64,               # Number of steps collected per environment before update
-        batch_size=256,             # Minibatch size for SGD updates during policy training
-        n_epochs=10,                # Number of epochs for PPO updates per rollout
-        gamma=0.99,                 # Discount factor
-        gae_lambda=0.95,            # GAE parameter
-        clip_range=0.2,             # PPO clipping range
+        learning_rate=3e-5, # Use the passed learning_rate
+        n_steps=2048,               # Number of steps collected per environment before update
+        batch_size=512,             # Minibatch size for SGD updates during policy training
+        n_epochs=8,                # Number of epochs for PPO updates per rollout
+        gamma=0.95,                 # Discount factor
+        gae_lambda=0.92,            # GAE parameter
+        clip_range=0.15,             # PPO clipping range
+        target_kl=0.03,  # Add KL early stopping
         ent_coef=0.01,              # Entropy coefficient for exploration
-        vf_coef=0.5,                # Value function coefficient
-        max_grad_norm=0.5,          # Max gradient norm for clipping
+        vf_coef=0.7,                # Value function coefficient
+        max_grad_norm=0.3,          # Max gradient norm for clipping
         tensorboard_log="./ppo_tensorboard/",
         verbose=1,                  # Verbosity level (1 for training progress)
         device=device,              # Device for computations ('cpu' or 'cuda')
         policy_kwargs=dict(         # Pass arguments to your custom policy's __init__
             features_extractor_class=GNNFeatureExtractor, # Specify your GNN feature extractor
-            features_extractor_kwargs=dict(hidden_dim=64, heads=4) # Pass args to GNNFeatureExtractor
+            features_extractor_kwargs=dict(hidden_dim=512, heads=4) # Pass args to GNNFeatureExtractor
         )
     )
     
     print(f"PPO Model created. Training for {model._total_timesteps} timesteps...")
     # total_timesteps refers to the total number of environment steps (sum across all environments)
-    model.learn(total_timesteps=50000) # Example: Train for 500k environment steps
+    model.learn(total_timesteps=500_000) # Example: Train for 500k environment steps
 
     return model
