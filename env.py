@@ -125,23 +125,17 @@ class GNNInterpretEnvironment(gym.Env):
             
         # Handle both Batch and Data objects
         if isinstance(current_graph_batch, Batch):
-            if current_graph_batch.num_graphs > 1:
-                self.current_graph = current_graph_batch.get_example(0).to(self.device)
-            else:
-                self.current_graph = current_graph_batch.to(self.device)
+            self.current_graph = current_graph_batch.get_example(0).to(self.device)
         else:
             self.current_graph = current_graph_batch.to(self.device)
         
-        # Initial node selection (using heuristic)
-        initial_node = None
+        # Initial node selection
         if self.current_graph.edge_index.numel() > 0: # Ensure graph has edges for degree calculation
             node_degrees = degree(self.current_graph.edge_index[0], num_nodes=self.current_graph.num_nodes)
-            initial_node = torch.argmax(node_degrees).item()
+            self.initial_node_idx = torch.argmax(node_degrees).item()
         else: # Fallback for graphs with no edges or for safety
-            initial_node = 0
+            self.initial_node_idx = 0
         
-        self.initial_node_idx = initial_node # Store the initial node index
-
         # Reset explanation state
         self.num_steps_taken = 0
         self.current_explanation_nodes = {self.initial_node_idx}
@@ -149,24 +143,19 @@ class GNNInterpretEnvironment(gym.Env):
         # Get original prediction of the GNN model
         self.gnn_model.eval() # Set GNN to evaluation mode
         with torch.no_grad():
-            if isinstance(self.current_graph, Batch): # Handle batch case if model expects it
-                original_pred_logits = self.gnn_model(self.current_graph)
-                # If model returns batch logits, take for the first graph
-                if original_pred_logits.dim() > 1 and original_pred_logits.size(0) > 1:
-                    original_pred_logits = original_pred_logits[0].unsqueeze(0)
-            else:
-                original_pred_logits = self.gnn_model(self.current_graph)
-            
-            self.original_prediction_logits = original_pred_logits.squeeze(0) # Store as 1D tensor
-
+            # Request node embeddings from the model
+            original_pred_logits, original_node_embeddings = self.gnn_model(self.current_graph, return_embeddings=True)
+            self.original_prediction_logits = original_pred_logits.squeeze(0)
             self.original_target_class = torch.argmax(self.original_prediction_logits).item()
+            
+            # Store the embedding of the seed node
+            self.original_seed_node_embedding = original_node_embeddings[self.initial_node_idx]
 
         self.original_graph_num_nodes = self.current_graph.num_nodes
         self.original_graph_num_edges = self.current_graph.edge_index.size(1)
 
         observation = self._get_obs()
         info = {}
-
         return observation, info
     
     def calculate_metrics(self):
@@ -188,6 +177,8 @@ class GNNInterpretEnvironment(gym.Env):
         # The 'relabel_nodes=True' means node features 'x' for the subgraph will
         # only contain features of the selected nodes, indexed from 0 to num_explanation_nodes-1.
         # The 'edge_index' will also be re-indexed.
+        node_map = {original_idx: new_idx for new_idx, original_idx in enumerate(self.current_explanation_nodes)}
+
         sub_edge_index, _ = subgraph(
             nodes_in_exp_tensor,
             self.current_graph.edge_index,
@@ -206,7 +197,8 @@ class GNNInterpretEnvironment(gym.Env):
         # Get prediction on the masked subgraph
         self.gnn_model.eval() # Set GNN to evaluation mode
         with torch.no_grad():
-            masked_pred_logits = self.gnn_model(masked_graph_data).squeeze(0)
+            masked_pred_logits, subgraph_node_embeddings = self.gnn_model(masked_graph_data, return_embeddings=True)
+            masked_pred_logits = masked_pred_logits.squeeze(0)
 
         # Fidelity calculation
         masked_pred_probs = F.softmax(masked_pred_logits, dim=-1)
@@ -242,16 +234,18 @@ class GNNInterpretEnvironment(gym.Env):
                 radius_penalty_score = 0.0
 
         # Similarity Loss: ||H̄T(v0) - zv0||2
-        # This requires node embeddings. Your GNN model (GNNWithAttention) currently outputs
-        # graph-level predictions. You would need to modify GNNWithAttention to return
-        # intermediate node embeddings and ensure GNNFeatureExtractor also passes them.
-        # This is a significant architectural change to the baseline GNN.
-        # For now, this is a placeholder. Without it, the paper's full reward is not implemented.
         similarity_loss_score = 0.0 
-        # To implement:
-        # 1. Modify GNNWithAttention to return original node embeddings (zv0 for initial_node_idx).
-        # 2. Modify GNNWithAttention to return subgraph node embeddings (H̄T(v0) for initial_node_idx).
-        # 3. Calculate F.mse_loss(H̄T(v0), zv0)
+        # Check if the seed node is in the explanation to get its new embedding
+        if self.initial_node_idx in self.current_explanation_nodes:
+            # Get the new index of the seed node in the re-labeled subgraph
+            subgraph_seed_node_idx = node_map[self.initial_node_idx]
+            
+            # Get the embedding from the subgraph
+            subgraph_seed_node_embedding = subgraph_node_embeddings[subgraph_seed_node_idx]
+            
+            # Calculate the L2 norm (Euclidean distance)
+            similarity_loss_score = F.mse_loss(self.original_seed_node_embedding, subgraph_seed_node_embedding).item()
+
 
         return fidelity_score, sparsity_score, radius_penalty_score, similarity_loss_score, num_explanation_nodes
 

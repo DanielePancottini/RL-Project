@@ -268,6 +268,6 @@ def train_interpretable_gnn(baseline_gnn, env_dataloader, n_envs, max_nodes, max
     
     print(f"PPO Model created. Training for {model._total_timesteps} timesteps...")
     # total_timesteps refers to the total number of environment steps (sum across all environments)
-    model.learn(total_timesteps=500_000) # Example: Train for 500k environment steps
+    model.learn(total_timesteps=4096) # Example: Train for 500k environment steps
 
     return model
