@@ -1,14 +1,14 @@
 import torch
 from torch_geometric.datasets import MoleculeNet
 from torch_geometric.loader import DataLoader
-import torch_geometric.transforms as T
+from env import GNNInterpretEnvironment
+from policy import Policy
 from model import GNNWithAttention
 from sklearn.model_selection import train_test_split
 from train_gat import Trainer
 from collections import Counter
 import numpy as np
-from ppo import train_interpretable_gnn
-from utils import get_max_nodes_edges_from_dataset 
+from policy import train_reinforce_rollout
 import os
 
 # Set Device
@@ -168,14 +168,8 @@ if not os.path.exists(model_path):
     print(f"AUC-ROC: {auc_roc}")
 
 """
-    PPO Agent Training
+    RL Agent Training
 """
-
-# Compute max nodes and max edges
-print("Calculating max nodes and edges across the entire dataset for environment padding...")
-max_nodes_dataset, max_edges_dataset, node_feature_dim_dataset = get_max_nodes_edges_from_dataset(balanced_dataset)
-print(f"Global Max Nodes (from dataset): {max_nodes_dataset}, Global Max Edges (from dataset): {max_edges_dataset}, Node Feature Dim: {node_feature_dim_dataset}")
-
 
 # Define PPO DataLoaders
 env_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=False)
@@ -187,27 +181,25 @@ model.eval()
 # Assuming you have your baseline GNN model and data
 baseline_gnn = model
 
-"""
-trained_ppo = train_interpretable_gnn(
-    baseline_gnn,
-    ppo_training_dataloader,
-    batch_size = batch_size,
-    device = device
-)
-"""
+env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader, max_steps=8, device=device)
 
-# Define the number of parallel environments for Stable-Baselines3's VecEnv
-ppo_n_envs = 64 # Or 128, etc., depending on your resources. This is 'n_envs' for SB3.
+# policy
+input_dim = in_channels + 2  # original features + start flag + in-S flag
+policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
+optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
 
-trained_ppo_model = train_interpretable_gnn(
-    baseline_gnn, # Your pre-trained GNN model
-    env_dataloader, # The DataLoader with batch_size=1 for the environments
-    n_envs = ppo_n_envs, # Number of parallel environments
-    max_nodes = max_nodes_dataset, # Max nodes for observation padding
-    max_edges = max_edges_dataset, # Max edges for observation padding
-    node_feature_dim = node_feature_dim_dataset, # Node feature dimension for observation
-    device = device,
-    max_episode_steps = 50 # Example: set a max_steps_per_episode for the RL agent
-)
+# training hyperparameters
+EPISODES = 300
+ROLLOUT_M = 5            # Monte-Carlo rollouts per intermediate step (paper uses M)
+ROLLOUT_MAX_STEPS = 20
+USE_BASELINE = True
+ENTROPY = 1e-6
 
-print("\nPPO Agent Training Complete.")
+train_reinforce_rollout(env, policy, optimizer,
+                        episodes=EPISODES,
+                        rollout_M=ROLLOUT_M,
+                        rollout_max_steps=ROLLOUT_MAX_STEPS,
+                        baseline=USE_BASELINE,
+                        entropy_coeff=ENTROPY,
+                        device=device,
+                        log_every=10)
