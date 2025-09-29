@@ -1,4 +1,5 @@
 import torch
+from datasets.ba2dataset import BA2Dataset
 from torch_geometric.datasets import MoleculeNet
 from torch_geometric.loader import DataLoader
 from env import GNNInterpretEnvironment
@@ -15,7 +16,8 @@ import os
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load HIV dataset
-dataset = MoleculeNet(root='./data', name='HIV')
+#dataset = MoleculeNet(root='./data', name='HIV')
+dataset = BA2Dataset(root='./data/ba2')
 
 # Check dataset details
 print(f'Dataset size: {len(dataset)} | Dataset classes: {dataset.num_classes} | Target shape: {dataset.y.shape}')
