@@ -20,7 +20,7 @@ class GNNInterpretEnvironment(gym.Env):
         # Reward weights
         self.size_weight = 0.01
         self.radius_penalty_weight = 0.1
-        self.similarity_loss_weight = 1.0
+        self.similarity_loss_weight = 0.01
 
         # Runtime state
         self.current_graph = None
@@ -196,7 +196,7 @@ class GNNInterpretEnvironment(gym.Env):
         prediction = F.cross_entropy(masked_logits.unsqueeze(0), target, reduction='none')
         
         #Size Loss
-        size_loss = len(S_local)
+        size_loss = sub_edge_index.size(1) / 2
         
         #Radius Loss
         radius = 0.0
