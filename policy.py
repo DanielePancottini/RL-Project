@@ -6,12 +6,14 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
 
+from layers import SelfAttnPooling, Swish
+
 class Policy(nn.Module):
     """
     Policy implementing Θ1 + APPNP-like propagation + MLP + scorer θ3.
     Outputs a probability distribution over candidate nodes + STOP.
     """
-    def __init__(self, input_dim, hidden_dim = 128, L = 3, alpha = 0.1, device = 'cpu') -> None:
+    def __init__(self, input_dim, hidden_dim = 128, L = 3, alpha = 0.85, device = 'cpu') -> None:
         super().__init__()
 
         self.device = device
@@ -19,9 +21,15 @@ class Policy(nn.Module):
         self.alpha = alpha
         self.theta1 = nn.Linear(input_dim, hidden_dim)
         self.mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim))
-        self.theta3 = nn.Linear(hidden_dim, 1)
-        self.stop_layer = nn.Linear(hidden_dim, 2)
+        self.node_score = nn.Linear(hidden_dim, 1, bias=False)
+        self.stop_layer = nn.Linear(hidden_dim, 2, bias=False)
         self.value_layer = nn.Linear(hidden_dim, 1)
+        self.pooling = nn.Sequential(SelfAttnPooling(hidden_dim), Swish())
+
+        nn.init.zeros_(self.value_layer.weight.data)
+        nn.init.zeros_(self.node_score.weight.data)
+        nn.init.zeros_(self.stop_layer.weight.data)
+
 
     def propagate(self, x, A):
         """APPNP-like propagation"""
@@ -36,17 +44,19 @@ class Policy(nn.Module):
 
         H_delta = self.propagate(x_aug, A_norm)
         H_global[S_indices] += H_delta[S_indices]  # accumulate embeddings
+        global_z = self.pooling(H_global[S_indices])
 
         if len(candidate_nodes) == 0:
             logits_candidates = torch.tensor([], device=self.device)
         else:
             idx = torch.tensor(candidate_nodes, dtype=torch.long, device=self.device)
-            cand_emb = H_global[idx]
-            logits_candidates = torch.log_softmax(self.theta3(cand_emb).squeeze(-1), dim=0)
+            cand_emb = H_global[idx]    
+            node_scores = self.node_score(cand_emb).squeeze(-1)      # (num_candidates,)
+            logits_candidates = F.log_softmax(node_scores, dim=0) 
 
-        stop_logits = torch.log_softmax(self.stop_layer(H_global[S_indices].mean(dim=0, keepdim=True)), dim=1).squeeze(0)
+        stop_logits = torch.log_softmax(self.stop_layer(global_z), dim=0)
         all_logits = torch.cat([logits_candidates + stop_logits[0], stop_logits[1:]], dim=0)
-        value = self.value_layer(H_global[S_indices]).mean()
+        value = self.value_layer(global_z).squeeze()
         return all_logits, value, H_global
 
 """
@@ -142,11 +152,11 @@ def train_reinforce_rollout(env,
         entropy_loss = torch.stack(entropies).mean()
 
         # Total loss
-        loss = policy_loss + value_loss - entropy_coeff * entropy_loss
+        loss = policy_loss - entropy_coeff * entropy_loss
 
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+        #torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
         optimizer.step()
 
         # ---- Logging ----

@@ -1,12 +1,12 @@
 import torch
 from datasets.ba2dataset import BA2Dataset
-from torch_geometric.datasets import MoleculeNet
+from load_gcn import load_gcn_checkpoint
 from torch_geometric.loader import DataLoader
 from env import GNNInterpretEnvironment
 from policy import Policy
-from model import GNNWithAttention
+from model import GCNModel
 from sklearn.model_selection import train_test_split
-from train_gat import Trainer
+from train_model import Trainer
 from collections import Counter
 import numpy as np
 from policy import train_reinforce_rollout
@@ -69,7 +69,7 @@ for cls, count in class_counts.items():
 class_weights = torch.tensor(class_weights_list).to(device)
 
 # Print class balances in one line
-print("HIV Class Balances: " + ", ".join([f"Class {cls}: {count}" for cls, count in class_counts.items()]))
+print("Dataset Class Balances: " + ", ".join([f"Class {cls}: {count}" for cls, count in class_counts.items()]))
 print(f"Class Weights: {class_weights}")
 
 """
@@ -112,7 +112,7 @@ test_dataset = normalize_dataset(test_dataset, mean, std)
     Data Loaders Section
 """
 
-batch_size = 128
+batch_size = 64
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True) 
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -129,30 +129,27 @@ print(first_batch)
 """
 
 # Model Parameters and Model Definition
-in_channels = dataset.num_node_features
-hidden_channels = 256
+features_dim = dataset.num_node_features
 num_classes = dataset.num_classes
-heads = 8
-dropout = 0.3
 
 """
     Training Section
 """
 
-model_path = "./models/trained_model.pt"
+model_path = "./models/ba2/best_model"
+
+# Model Definition
+model = GCNModel(features_dim, num_classes, device).to(device)
 
 # If already trained skip training
 if not os.path.exists(model_path):
-
-    # Model & Optimizer
-    model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
 
     # Train GNN
     trainer = Trainer(model, class_weights, device)
     trained_model = trainer.train(train_loader, val_loader)
 
     # Save the model
-    torch.save(trained_model.state_dict(), "./models/trained_model.pt")
+    #torch.save(trained_model.state_dict(), "./models/trained_model.pt")
 
     """
         Evaluation Section
@@ -169,6 +166,8 @@ if not os.path.exists(model_path):
     print("Confusion Matrix:\n", conf_matrix)
     print(f"AUC-ROC: {auc_roc}")
 
+model, info = load_gcn_checkpoint(model, model_path, device)
+
 """
     RL Agent Training
 """
@@ -176,8 +175,6 @@ if not os.path.exists(model_path):
 # Define PPO DataLoaders
 env_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=False)
 
-model = GNNWithAttention(in_channels, hidden_channels, num_classes, dropout, heads).to(device)
-model.load_state_dict(torch.load("./models/trained_model.pt"))
 model.eval()
 
 # Assuming you have your baseline GNN model and data
@@ -186,7 +183,7 @@ baseline_gnn = model
 env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader, max_steps=8, device=device)
 
 # policy
-input_dim = in_channels + 2  # original features + start flag + in-S flag
+input_dim = features_dim + 2  # original features + start flag + in-S flag
 policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
 optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
 
@@ -194,7 +191,7 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
 EPISODES = 300
 ROLLOUT_M = 5            # Monte-Carlo rollouts per intermediate step (paper uses M)
 ROLLOUT_MAX_STEPS = 20
-USE_BASELINE = True
+USE_BASELINE = False
 ENTROPY = 1e-6
 
 train_reinforce_rollout(env, policy, optimizer,

@@ -12,7 +12,7 @@ class Trainer:
         # Training params
         self.num_epochs = 10
         self.weight_decay = 1e-4
-        self.lr = 1e-3
+        self.lr = 1e-5
         
         # Model & Optimizer
         self.model = model
@@ -35,7 +35,7 @@ class Trainer:
 
                 # Forward pass
                 self.optimizer.zero_grad()
-                output = self.model(data)
+                output = self.model(data.x, data.edge_index, data.batch)
                 target = data.y.squeeze().long()
 
                 # Calculate loss
@@ -74,7 +74,7 @@ class Trainer:
                 data = data.to(self.device)
                 
                 # Forward pass
-                output = self.model(data)
+                output = self.model(data.x, data.edge_index, data.batch)
                 
                 # Convert logits to probabilities for AUC-ROC
                 probs = torch.sigmoid(output[:, 1])  # Get probability of class 1
@@ -109,7 +109,7 @@ class Trainer:
 
                 data = data.to(self.device)
 
-                output = self.model(data)
+                output = self.model(data.x, data.edge_index, data.batch)
                 target = data.y.squeeze().long()
 
                 loss = self.loss_fn(output, target)

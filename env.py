@@ -66,11 +66,11 @@ class GNNInterpretEnvironment(gym.Env):
         # store original pred and seed embedding
         self.gnn_model.eval()
         with torch.no_grad():
-            logits, embeddings = self.gnn_model(self.current_graph, return_embeddings=True)
+            logits = self.gnn_model(self.current_graph.x, self.current_graph.edge_index)
             logits = logits.squeeze(0)
             self.original_pred_logits = logits.detach()
             self.original_target_class = int(torch.argmax(logits).item())
-            self.original_seed_node_embedding = embeddings[self.initial_node].detach()
+            self.original_graph_embedding = self.gnn_model.graph_embedding(self.current_graph.x, self.current_graph.edge_index)
 
         return self._make_obs(self.S), {}
 
@@ -183,10 +183,9 @@ class GNNInterpretEnvironment(gym.Env):
 
         self.gnn_model.eval()
         with torch.no_grad():
-            masked_logits, sub_node_embeddings = self.gnn_model(sub_data, return_embeddings=True)
+            masked_logits = self.gnn_model(sub_data.x, sub_data.edge_index)
+            masked_graph_embeddings = self.gnn_model.graph_embedding(sub_data.x, sub_data.edge_index)
             masked_logits = masked_logits.squeeze(0)
-
-        masked_probs = F.softmax(masked_logits, dim=-1)
 
         #Prediction Loss
         target = torch.tensor(
@@ -207,18 +206,14 @@ class GNNInterpretEnvironment(gym.Env):
                 radius = float(d)
 
         #Similarity Loss
-        similarity = 0.0
-        if self.initial_node in S_local:
-            seed_local = nodes_sorted.index(self.initial_node)
-            seed_emb_sub = sub_node_embeddings[seed_local]
-            similarity = float(F.mse_loss(self.original_seed_node_embedding, seed_emb_sub).item())
+        similarity = torch.norm(self.original_graph_embedding - masked_graph_embeddings)
 
         total_loss = prediction + \
                      size_loss * self.size_weight + \
                      radius * self.radius_penalty_weight + \
                      similarity * self.similarity_loss_weight
 
-        reward = -total_loss
+        reward = -total_loss.detach()
         info = {'prediction': prediction, 'size loss': size_loss, 'radius': radius, 'similarity': similarity, 'size': len(S_local)}
         return reward, info
 

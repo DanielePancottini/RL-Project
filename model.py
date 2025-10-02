@@ -1,67 +1,72 @@
 import torch
 
+from torch.nn import ReLU, Linear
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.nn import GCNConv, global_mean_pool, global_max_pool
 
-class GNNWithAttention(nn.Module):
-    def __init__(self, input_dim, hidden_dim, out_channels, dropout = 0.2, heads = 1):
-        super(GNNWithAttention, self).__init__()
 
-        # GAT Layers
-        self.gat1 = GATConv(input_dim, hidden_dim, heads=heads, concat=True)
-        self.layer_norm1 = nn.LayerNorm(hidden_dim * heads)
-        
-        self.gat2 = GATConv(hidden_dim * heads, hidden_dim, heads=heads, concat=True)
-        self.layer_norm2 = nn.LayerNorm(hidden_dim * heads)
+class GCNModel(torch.nn.Module):
+    """
+    A graph clasification model for graphs decribed in https://arxiv.org/abs/1903.03894.
+    This model consists of 3 stacked GCN layers followed by a linear layer.
+    In between the GCN outputs and linear layers are pooling operations in both mean and max.
+    """
+    def __init__(self, num_features, num_classes, device):
+        super(GCNModel, self).__init__()
+        self.device = device
+        self.embedding_size = 20
+        self.conv1 = GCNConv(num_features, 20)
+        self.relu1 = nn.ReLU()
+        self.conv2 = GCNConv(20, 20)
+        self.relu2 = ReLU()
+        self.conv3 = GCNConv(20, 20)
+        self.relu3 = ReLU()
+        self.lin = Linear(self.embedding_size * 2, num_classes)
 
-        #Dropout
-        self.dropout = nn.Dropout(dropout)
+    def forward(self, x, edge_index, batch=None, edge_weights=None):
+        if batch is None: # No batch given
+            batch = torch.zeros(x.size(0), dtype=torch.long, device=self.device)
+        embed = self.embedding(x, edge_index, edge_weights)
 
-        self.skip_connection1 = nn.Linear(input_dim, hidden_dim * heads)
+        out1 = global_max_pool(embed, batch)
+        out2 = global_mean_pool(embed, batch)
+        input_lin = torch.cat([out1, out2], dim=-1)
 
-        # Fully connected classification layer
-        self.fc = nn.Linear(hidden_dim * heads, out_channels)
-        self.batch_norm = nn.BatchNorm1d(out_channels) 
+        out = self.lin(input_lin)
+        return out
 
-    def forward(self, data, return_attention=False, return_embeddings=False):
+    def embedding(self, x, edge_index, edge_weights=None):
+        if edge_weights is None:
+            edge_weights = torch.ones(edge_index.size(1), device=self.device)
+        stack = []
 
-        x, edge_index, batch = data.x, data.edge_index, data.batch
+        out1 = self.conv1(x, edge_index, edge_weights)
+        out1 = torch.nn.functional.normalize(out1, p=2, dim=1)
+        out1 = self.relu1(out1)
+        stack.append(out1)
 
-        # --- Layer 1: GAT with residual connection ---
-        x_res1 = x
-        x1 = self.gat1(x, edge_index)
-        x1 = self.layer_norm1(x1)
-        x1 = F.elu(x1)
-        x1 = self.dropout(x1)
-        x1 = x1 + self.skip_connection1(x_res1)
-        
-        # --- Layer 2: GAT with residual connection ---
-        x_res2 = x1
-        
-        if return_attention:
-            x2, (edge_index_att, att_weights) = self.gat2(
-                x1, edge_index, return_attention_weights=True
-            )
-        else:
-            x2 = self.gat2(x1, edge_index)
-           
-        x2 = self.layer_norm2(x2 + x_res2)  # Residual connection
-        node_embeddings = F.elu(x2)
-        node_embeddings = self.dropout(node_embeddings)
-        
-        # --- Global pooling and classification ---
-        graph_emb = global_mean_pool(node_embeddings, batch)
-        logits = self.fc(graph_emb)
-        logits = self.batch_norm(logits)
-        
-        # --- Return handling ---
-        if return_embeddings:
-            if return_attention:
-                return logits, node_embeddings, (edge_index_att, att_weights)
-            return logits, node_embeddings
-        else:
-            if return_attention:
-                return logits, (edge_index_att, att_weights)
-            return logits
+        out2 = self.conv2(out1, edge_index, edge_weights)
+        out2 = torch.nn.functional.normalize(out2, p=2, dim=1)
+        out2 = self.relu2(out2)
+        stack.append(out2)
+
+        out3 = self.conv3(out2, edge_index, edge_weights)
+        out3 = torch.nn.functional.normalize(out3, p=2, dim=1)
+        out3 = self.relu3(out3)
+
+        input_lin = out3
+
+        return input_lin
+
+    def graph_embedding(self, x, edge_index, batch=None, edge_weights=None):
+        if batch is None: # No batch given
+            batch = torch.zeros(x.size(0), dtype=torch.long, device=self.device)
+        embed = self.embedding(x, edge_index, edge_weights)
+
+        out1 = global_max_pool(embed, batch)
+        out2 = global_mean_pool(embed, batch)
+        input_lin = torch.cat([out1, out2], dim=-1)
+
+        return input_lin

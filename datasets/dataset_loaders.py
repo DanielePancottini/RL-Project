@@ -1,9 +1,6 @@
 import numpy as np
-import scipy.sparse as sp
 import torch
-import scipy
 import pickle as pkl
-from scipy.sparse import coo_matrix
 
 """
 Most of the functions in this module are copied from the PGExplainer code base. This ensures that the data is handled in the same way.
