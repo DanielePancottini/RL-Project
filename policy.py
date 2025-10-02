@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
+from tqdm import tqdm
+from torch_geometric.utils import degree
 
 from layers import SelfAttnPooling, Swish
 
@@ -58,6 +60,85 @@ class Policy(nn.Module):
         all_logits = torch.cat([logits_candidates + stop_logits[0], stop_logits[1:]], dim=0)
         value = self.value_layer(global_z).squeeze()
         return all_logits, value, H_global
+
+"""
+    Pretrain Policy
+"""
+def pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, device='cpu'):
+    """
+    Pre-trains the policy using imitation learning on expert trajectories.
+    This corresponds to the paper's `pretrain_list` phase.
+    """
+    print("Starting Policy Pre-training...")
+    policy.to(device)
+    policy.train()
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    for epoch in range(1, epochs + 1):
+        total_loss = 0
+        
+        # Shuffle the trajectories for each epoch
+        random.shuffle(expert_trajectories)
+        
+        for graph, expert_actions in tqdm(expert_trajectories, desc=f"Pre-train Epoch {epoch}/{epochs}"):
+            
+            # Manually reset the environment with the current graph
+            # Note: This is a simplified reset, you may need to adapt it if your
+            # env.reset() does more complex things.
+            env.current_graph = graph.to(env.device)
+            if graph.edge_index.numel() > 0:
+                deg = degree(graph.edge_index[0], num_nodes=graph.num_nodes)
+                env.initial_node = int(torch.argmax(deg).item())
+            else:
+                env.initial_node = 0
+            
+            env.S = {env.initial_node}
+            env._precompute_graph_structures()
+            
+            # Initialize hidden state for the policy
+            H_global = torch.zeros((env.current_graph.num_nodes, policy.theta1.out_features), device=env.device)
+            
+            trajectory_loss = 0
+            
+            # Step through the expert trajectory
+            for expert_node_to_add in expert_actions:
+                # 1. Get the current state (observation) from the environment
+                obs = env._make_obs(env.S)
+                
+                # 2. Get the policy's action probabilities (logits) for the current state
+                logits, _, H_global_next = policy(obs['x_aug'], obs['A_norm'], obs['candidate_nodes'], 
+                                                  [obs['local_to_global'].index(n) for n in env.S], H_global)
+                H_global = H_global_next
+
+                # 3. Find the index of the expert's action in the current candidate list
+                # This is our target label for the supervised loss.
+                candidate_nodes_global = [obs['local_to_global'][i] for i in obs['candidate_nodes']]
+                
+                try:
+                    # The index of the expert action becomes our target class
+                    target_action_index = candidate_nodes_global.index(expert_node_to_add)
+                    target = torch.tensor([target_action_index], device=env.device)
+
+                    # 4. Calculate the Cross-Entropy loss
+                    # We need to ignore the final "STOP" action logit for this.
+                    action_logits = logits[:-1] 
+                    trajectory_loss += loss_fn(action_logits.unsqueeze(0), target)
+
+                except ValueError:
+                    # The expert node is not in the candidate list, which can happen. We just skip this step.
+                    pass
+                
+                # 5. Manually apply the expert action to update the environment state for the next step
+                env.S.add(expert_node_to_add)
+
+            if trajectory_loss > 0:
+                optimizer.zero_grad()
+                trajectory_loss.backward()
+                optimizer.step()
+                total_loss += trajectory_loss.item()
+        
+        avg_loss = total_loss / len(expert_trajectories) if len(expert_trajectories) > 0 else 0
+        print(f"[Pre-train Epoch {epoch}/{epochs}] Average Loss: {avg_loss:.4f}")
 
 """
     Training Loop

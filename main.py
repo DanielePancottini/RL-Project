@@ -1,9 +1,10 @@
 import torch
 from datasets.ba2dataset import BA2Dataset
+from datasets.ground_truth_loader import generate_expert_data_from_ground_truth
 from load_gcn import load_gcn_checkpoint
 from torch_geometric.loader import DataLoader
 from env import GNNInterpretEnvironment
-from policy import Policy
+from policy import Policy, pretrain_policy
 from model import GCNModel
 from sklearn.model_selection import train_test_split
 from train_model import Trainer
@@ -186,6 +187,19 @@ env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader,
 input_dim = features_dim + 2  # original features + start flag + in-S flag
 policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
 optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
+
+# 1. Generate the expert data using the ground truth loader
+# NOTE: Make sure your 'train_dataset' is shuffled in the same way as the
+# ground truth loader (i.e., using a fixed seed like 42).
+# Your train_test_split uses random_state=42, which is perfect.
+expert_trajectories = generate_expert_data_from_ground_truth(balanced_dataset, train_indices, device)
+
+# 2. Run the pre-training using the same function as before
+pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, device=device)
+
+print("\n" + "="*50)
+print("GROUND TRUTH PRE-TRAINING COMPLETE. STARTING REINFORCEMENT LEARNING.")
+print("="*50 + "\n")
 
 # training hyperparameters
 EPISODES = 300
