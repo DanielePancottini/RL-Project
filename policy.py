@@ -256,5 +256,8 @@ def train_reinforce_rollout(env,
             f"probs_sum={float(probs.sum().item()):.4f}"
             f"probs={probs.detach().cpu().numpy()}")
 
-    print("Training complete.")
+    print("Training complete, saving model.")
+
+    # Save
+    torch.save(policy.state_dict(), "./models/policy_model.pt")
 

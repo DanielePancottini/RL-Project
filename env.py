@@ -53,12 +53,16 @@ class GNNInterpretEnvironment(gym.Env):
         self.current_graph = graph
         self.steps_taken = 0
 
+        # choose seed: gradient-based
+        self.initial_node = self._choose_seed_gradient(graph)
+        """
         # choose seed: highest degree
         if graph.edge_index.numel() > 0:
             deg = degree(graph.edge_index[0], num_nodes=graph.num_nodes)
             self.initial_node = int(torch.argmax(deg).item())
         else:
             self.initial_node = 0
+        """
 
         self.S = {self.initial_node}
         self._precompute_graph_structures()
@@ -73,6 +77,23 @@ class GNNInterpretEnvironment(gym.Env):
             self.original_seed_node_embedding = self.gnn_model.embedding(self.current_graph.x, self.current_graph.edge_index)[self.initial_node].detach()
 
         return self._make_obs(self.S), {}
+    
+    def _choose_seed_gradient(self, graph):
+        graph.x.requires_grad = True
+        self.gnn_model.eval()
+
+        logits = self.gnn_model(graph.x, graph.edge_index).squeeze(0)
+        target_class = logits.argmax()
+        
+        self.gnn_model.zero_grad()
+        logits[target_class].backward()
+        
+        # Node importance = L2 norm of gradients
+        node_importance = graph.x.grad.norm(dim=1)
+        seed_node = int(torch.argmax(node_importance).item())
+        
+        graph.x.requires_grad = False
+        return seed_node
 
     def _precompute_graph_structures(self):
         
