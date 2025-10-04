@@ -70,7 +70,7 @@ class GNNInterpretEnvironment(gym.Env):
             logits = logits.squeeze(0)
             self.original_pred_logits = logits.detach()
             self.original_target_class = int(torch.argmax(logits).item())
-            self.original_graph_embedding = self.gnn_model.graph_embedding(self.current_graph.x, self.current_graph.edge_index)
+            self.original_seed_node_embedding = self.gnn_model.embedding(self.current_graph.x, self.current_graph.edge_index)[self.initial_node].detach()
 
         return self._make_obs(self.S), {}
 
@@ -180,23 +180,21 @@ class GNNInterpretEnvironment(gym.Env):
         sub_x = self.current_graph.x[nodes_tensor].to(self.device)
         sub_data = Data(x=sub_x, edge_index=sub_edge_index)
         sub_data.batch = torch.zeros(sub_x.size(0), dtype=torch.long, device=self.device)
+        
+        node_map = {g.item(): i for i, g in enumerate(nodes_tensor)}
 
         self.gnn_model.eval()
         with torch.no_grad():
-            masked_logits = self.gnn_model(sub_data.x, sub_data.edge_index)
-            masked_graph_embeddings = self.gnn_model.graph_embedding(sub_data.x, sub_data.edge_index)
-            masked_logits = masked_logits.squeeze(0)
+            masked_logits = self.gnn_model(sub_data.x, sub_data.edge_index).squeeze(0)
+            masked_seed_embedding = self.gnn_model.embedding(sub_data.x, sub_data.edge_index)[node_map[self.initial_node]].unsqueeze(0)
 
         #Prediction Loss
-        target = torch.tensor(
-            [self.original_target_class],  # batch of size 1
-            dtype=torch.long,
-            device=self.device
-        )
-        prediction = F.cross_entropy(masked_logits.unsqueeze(0), target, reduction='none')
-        
+        original_probs = F.softmax(self.original_pred_logits, dim=-1)
+        masked_log_probs = F.log_softmax(masked_logits, dim=-1)
+        prediction = - (original_probs * masked_log_probs).sum()
+
         #Size Loss
-        size_loss = sub_edge_index.size(1) / 2
+        size_loss = len(S_local)
         
         #Radius Loss
         radius = 0.0
@@ -206,7 +204,7 @@ class GNNInterpretEnvironment(gym.Env):
                 radius = float(d)
 
         #Similarity Loss
-        similarity = torch.norm(self.original_graph_embedding - masked_graph_embeddings)
+        similarity = torch.norm(self.original_seed_node_embedding - masked_seed_embedding, p=2).item()
 
         total_loss = prediction + \
                      size_loss * self.size_weight + \
