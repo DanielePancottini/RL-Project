@@ -241,7 +241,7 @@ def train_reinforce_rollout(env,
 
         optimizer.zero_grad()
         loss.backward()
-        #torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
         optimizer.step()
 
         # ---- Logging ----

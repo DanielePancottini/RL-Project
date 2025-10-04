@@ -105,11 +105,9 @@ def normalize_dataset(dataset, mean, std):
     
     return dataset
 
-"""
 train_dataset = normalize_dataset(train_dataset, mean, std)
 val_dataset = normalize_dataset(val_dataset, mean, std)
 test_dataset = normalize_dataset(test_dataset, mean, std)
-"""
 
 """
     Data Loaders Section
@@ -152,7 +150,7 @@ if not os.path.exists(model_path):
     trained_model = trainer.train(train_loader, val_loader)
 
     # Save the model
-    #torch.save(trained_model.state_dict(), "./models/trained_model.pt")
+    torch.save(trained_model.state_dict(), "./models/trained_model.pt")
 
     """
         Evaluation Section
@@ -188,27 +186,14 @@ env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader,
 # policy
 input_dim = features_dim + 2  # original features + start flag + in-S flag
 policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
-optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
-
-# 1. Generate the expert data using the ground truth loader
-# NOTE: Make sure your 'train_dataset' is shuffled in the same way as the
-# ground truth loader (i.e., using a fixed seed like 42).
-# Your train_test_split uses random_state=42, which is perfect.
-expert_trajectories = generate_expert_data_from_ground_truth(balanced_dataset, train_indices, device)
-
-# 2. Run the pre-training using the same function as before
-#pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=10, device=device)
-
-print("\n" + "="*50)
-print("GROUND TRUTH PRE-TRAINING COMPLETE. STARTING REINFORCEMENT LEARNING.")
-print("="*50 + "\n")
+optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
 
 # training hyperparameters
 EPISODES = 300
 ROLLOUT_M = 5            # Monte-Carlo rollouts per intermediate step (paper uses M)
 ROLLOUT_MAX_STEPS = 20
-USE_BASELINE = False
-ENTROPY = 1e-6
+USE_BASELINE = True
+ENTROPY = 1e-3
 
 train_reinforce_rollout(env, policy, optimizer,
                         episodes=EPISODES,
