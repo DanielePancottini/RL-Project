@@ -105,9 +105,11 @@ def normalize_dataset(dataset, mean, std):
     
     return dataset
 
+"""
 train_dataset = normalize_dataset(train_dataset, mean, std)
 val_dataset = normalize_dataset(val_dataset, mean, std)
 test_dataset = normalize_dataset(test_dataset, mean, std)
+"""
 
 """
     Data Loaders Section
@@ -181,7 +183,7 @@ model.eval()
 # Assuming you have your baseline GNN model and data
 baseline_gnn = model
 
-env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader, max_steps=8, device=device)
+env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader, max_steps=20, device=device)
 
 # policy
 input_dim = features_dim + 2  # original features + start flag + in-S flag
@@ -195,7 +197,7 @@ optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
 expert_trajectories = generate_expert_data_from_ground_truth(balanced_dataset, train_indices, device)
 
 # 2. Run the pre-training using the same function as before
-pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, device=device)
+#pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=10, device=device)
 
 print("\n" + "="*50)
 print("GROUND TRUTH PRE-TRAINING COMPLETE. STARTING REINFORCEMENT LEARNING.")

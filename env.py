@@ -217,12 +217,11 @@ class GNNInterpretEnvironment(gym.Env):
         info = {'prediction': prediction, 'size loss': size_loss, 'radius': radius, 'similarity': similarity, 'size': len(S_local)}
         return reward, info
 
-    def simulate_rollout_from_S(self, S_init, policy, H_global, max_rollout_steps = None, stochastic = True):
+    def simulate_rollout_from_S(self, S_init, policy, max_rollout_steps = None, stochastic = True):
         if max_rollout_steps is None:
             max_rollout_steps = self.max_steps
         
         S_local = set(S_init)  # copy
-        H_rollout = H_global.clone() #clone
 
         steps = 0
         while True:
@@ -231,11 +230,10 @@ class GNNInterpretEnvironment(gym.Env):
             S_indices = [obs_local['local_to_global'].index(n) for n in S_local]
             stop_idx = len(candidates)
             with torch.no_grad():
-                logits, value, H_rollout = policy(obs_local['x_aug'], obs_local['A_norm'], candidates, S_indices, H_rollout)
-            if logits.numel() == 1:
+                probs, value = policy(obs_local['x_aug'], obs_local['A_norm'], candidates, S_indices)
+            if probs.numel() == 1:
                 act_idx = 0
             else:
-                probs = torch.exp(logits)
                 if stochastic:
                     dist = Categorical(probs)
                     act_idx = dist.sample().item()
@@ -252,9 +250,9 @@ class GNNInterpretEnvironment(gym.Env):
                 reward, info = self._compute_final_reward(S_local)
                 return reward, info
 
-    def estimate_Q(self, S_after_action: set, policy, H_global, M = 10, max_rollout_steps = None):
+    def estimate_Q(self, S_after_action: set, policy, M = 10, max_rollout_steps = None):
         rewards = []
         for i in range(M):
-            r, _ = self.simulate_rollout_from_S(S_after_action, policy, H_global, max_rollout_steps=max_rollout_steps, stochastic=True)
+            r, _ = self.simulate_rollout_from_S(S_after_action, policy, max_rollout_steps=max_rollout_steps, stochastic=True)
             rewards.append(r)
         return torch.stack(rewards).mean().item(), rewards

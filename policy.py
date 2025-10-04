@@ -8,8 +8,6 @@ import numpy as np
 from tqdm import tqdm
 from torch_geometric.utils import degree
 
-from layers import SelfAttnPooling, Swish
-
 class Policy(nn.Module):
     """
     Policy implementing Θ1 + APPNP-like propagation + MLP + scorer θ3.
@@ -23,14 +21,9 @@ class Policy(nn.Module):
         self.alpha = alpha
         self.theta1 = nn.Linear(input_dim, hidden_dim)
         self.mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim))
-        self.node_score = nn.Linear(hidden_dim, 1, bias=False)
-        self.stop_layer = nn.Linear(hidden_dim, 2, bias=False)
+        self.node_score = nn.Linear(hidden_dim, 1)
+        self.stop_score = nn.Linear(hidden_dim, 1)
         self.value_layer = nn.Linear(hidden_dim, 1)
-        self.pooling = nn.Sequential(SelfAttnPooling(hidden_dim), Swish())
-
-        nn.init.zeros_(self.value_layer.weight.data)
-        nn.init.zeros_(self.node_score.weight.data)
-        nn.init.zeros_(self.stop_layer.weight.data)
 
 
     def propagate(self, x, A):
@@ -42,24 +35,42 @@ class Policy(nn.Module):
         H_bar = self.mlp(H)
         return H_bar
 
-    def forward(self, x_aug, A_norm, candidate_nodes, S_indices, H_global):
+    def forward(self, x_aug, A_norm, candidate_nodes, S_indices):
 
-        H_delta = self.propagate(x_aug, A_norm)
-        H_global[S_indices] += H_delta[S_indices]  # accumulate embeddings
-        global_z = self.pooling(H_global[S_indices])
+        H_global = self.propagate(x_aug, A_norm)  # (num_nodes, hidden_dim)
 
+        """Candidates score"""
         if len(candidate_nodes) == 0:
-            logits_candidates = torch.tensor([], device=self.device)
+            candidate_scores = torch.tensor([], device=self.device)
         else:
-            idx = torch.tensor(candidate_nodes, dtype=torch.long, device=self.device)
-            cand_emb = H_global[idx]    
-            node_scores = self.node_score(cand_emb).squeeze(-1)      # (num_candidates,)
-            logits_candidates = F.log_softmax(node_scores, dim=0) 
+            candidate_scores = self.node_score(H_global[candidate_nodes]).squeeze(-1)  # (num_candidates,)
 
-        stop_logits = torch.log_softmax(self.stop_layer(global_z), dim=0)
-        all_logits = torch.cat([logits_candidates + stop_logits[0], stop_logits[1:]], dim=0)
-        value = self.value_layer(global_z).squeeze()
-        return all_logits, value, H_global
+        """STOP embedding and score"""
+        S_tensor = torch.tensor(S_indices, dtype=torch.long, device=self.device) if len(S_indices) > 0 else torch.tensor([], dtype=torch.long, device=self.device)
+        cand_tensor = torch.tensor(candidate_nodes, dtype=torch.long, device=self.device) if len(candidate_nodes) > 0 else torch.tensor([], dtype=torch.long, device=self.device)
+        union_nodes = torch.cat([S_tensor, cand_tensor], dim=0) # Union = S_{t-1} ∪ ∂S_{t-1}
+
+        union_emb = H_global[union_nodes]  # (|Union|, hidden_dim)
+
+        # Attention for STOP
+        attn_scores = self.stop_score(union_emb).squeeze(-1)  # (|Union|,)
+        attn_weights = F.softmax(attn_scores, dim=0).unsqueeze(-1)  # (|Union|, 1)
+
+        # Stop embedding
+        H_stop = torch.sum(attn_weights * union_emb, dim=0)  # (hidden_dim,)
+
+        #Stop score
+        stop_score = self.node_score(H_stop).squeeze(-1)  # scalar
+
+        """Final probabilities"""
+        all_scores = torch.cat([candidate_scores, stop_score.unsqueeze(0)], dim=0)  # (num_candidates + 1,)
+        all_probs = F.softmax(all_scores, dim=0)  # (num_candidates + 1,)
+
+        """Value estimate"""
+        value = self.value_layer(H_stop).squeeze(-1)  # scalar
+
+        return all_probs, value
+
 
 """
     Pretrain Policy
@@ -95,9 +106,6 @@ def pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, devi
             env.S = {env.initial_node}
             env._precompute_graph_structures()
             
-            # Initialize hidden state for the policy
-            H_global = torch.zeros((env.current_graph.num_nodes, policy.theta1.out_features), device=env.device)
-            
             trajectory_loss = 0
             
             # Step through the expert trajectory
@@ -106,9 +114,8 @@ def pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, devi
                 obs = env._make_obs(env.S)
                 
                 # 2. Get the policy's action probabilities (logits) for the current state
-                logits, _, H_global_next = policy(obs['x_aug'], obs['A_norm'], obs['candidate_nodes'], 
-                                                  [obs['local_to_global'].index(n) for n in env.S], H_global)
-                H_global = H_global_next
+                probs, _ = policy(obs['x_aug'], obs['A_norm'], obs['candidate_nodes'], 
+                                                  [obs['local_to_global'].index(n) for n in env.S])
 
                 # 3. Find the index of the expert's action in the current candidate list
                 # This is our target label for the supervised loss.
@@ -121,8 +128,8 @@ def pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, devi
 
                     # 4. Calculate the Cross-Entropy loss
                     # We need to ignore the final "STOP" action logit for this.
-                    action_logits = logits[:-1] 
-                    trajectory_loss += loss_fn(action_logits.unsqueeze(0), target)
+                    action_probs = probs[:-1] 
+                    trajectory_loss += loss_fn(action_probs.unsqueeze(0), target)
 
                 except ValueError:
                     # The expert node is not in the candidate list, which can happen. We just skip this step.
@@ -167,16 +174,13 @@ def train_reinforce_rollout(env,
         done = False
         steps = 0
 
-        H_global = torch.zeros((env.current_graph.num_nodes, policy.theta1.out_features), device=device) # Num nodes X Hidden Dim
-
         while not done:
             x_aug = obs['x_aug']
             A_norm = obs['A_norm']
             candidates = list(obs['candidate_nodes'])
             S_indices = [obs['local_to_global'].index(n) for n in env.S]
 
-            logits, value, H_global = policy(x_aug, A_norm, candidates, S_indices, H_global)
-            probs = torch.exp(logits)
+            probs, value = policy(x_aug, A_norm, candidates, S_indices)
             dist = Categorical(probs)
             action_idx = dist.sample()
             logp = dist.log_prob(action_idx)
@@ -197,7 +201,7 @@ def train_reinforce_rollout(env,
                 for local_idx, flag in enumerate(in_S_flags):
                     if float(flag.item()) == 1.0:
                         S_after_action.add(int(nodes_local[local_idx]))
-                q_est, rollout_rewards = env.estimate_Q(S_after_action, policy, H_global, M=rollout_M, max_rollout_steps=rollout_max_steps)
+                q_est, rollout_rewards = env.estimate_Q(S_after_action, policy, M=rollout_M, max_rollout_steps=rollout_max_steps)
                 q_est = torch.tensor(q_est, dtype=torch.float32, device=device)
 
             traj_log_probs.append(logp)
@@ -233,7 +237,7 @@ def train_reinforce_rollout(env,
         entropy_loss = torch.stack(entropies).mean()
 
         # Total loss
-        loss = policy_loss - entropy_coeff * entropy_loss
+        loss = policy_loss + 0.5 * value_loss - entropy_coeff * entropy_loss
 
         optimizer.zero_grad()
         loss.backward()
