@@ -55,14 +55,13 @@ class GNNInterpretEnvironment(gym.Env):
 
         # choose seed: gradient-based
         self.initial_node = self._choose_seed_gradient(graph)
-        """
+        
         # choose seed: highest degree
         if graph.edge_index.numel() > 0:
             deg = degree(graph.edge_index[0], num_nodes=graph.num_nodes)
             self.initial_node = int(torch.argmax(deg).item())
         else:
             self.initial_node = 0
-        """
 
         self.S = {self.initial_node}
         self._precompute_graph_structures()
@@ -260,18 +259,18 @@ class GNNInterpretEnvironment(gym.Env):
                     act_idx = int(torch.argmax(probs).item())
             if act_idx == stop_idx:
                 reward, info = self._compute_final_reward(S_local)
-                return reward, info
+                return reward, info, S_local
             chosen_local = candidates[act_idx]
             chosen_global = obs_local['local_to_global'][chosen_local]
             S_local.add(int(chosen_global))
             steps += 1
             if steps >= max_rollout_steps:
                 reward, info = self._compute_final_reward(S_local)
-                return reward, info
+                return reward, info, S_local
 
     def estimate_Q(self, S_after_action: set, policy, M = 10, max_rollout_steps = None):
         rewards = []
         for i in range(M):
-            r, _ = self.simulate_rollout_from_S(S_after_action, policy, max_rollout_steps=max_rollout_steps, stochastic=True)
+            r, _, _ = self.simulate_rollout_from_S(S_after_action, policy, max_rollout_steps=max_rollout_steps, stochastic=True)
             rewards.append(r)
         return torch.stack(rewards).mean().item(), rewards

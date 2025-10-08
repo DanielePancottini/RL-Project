@@ -1,6 +1,7 @@
 import torch
 from datasets.ba2dataset import BA2Dataset
 from datasets.ground_truth_loader import generate_expert_data_from_ground_truth
+from evaluate_policy import evaluate_policy_ba2
 from load_gcn import load_gcn_checkpoint
 from torch_geometric.loader import DataLoader
 from env import GNNInterpretEnvironment
@@ -25,47 +26,59 @@ print(f'Dataset size: {len(dataset)} | Dataset classes: {dataset.num_classes} | 
 print(dataset[0])  # Print details of the first molecule graph
 
 """
-    Upsampling Section
+    Data Splitting and Upsampling Section
 """
 
-# Assuming `data.y` contains the class labels
+ # Get indices and labels from the dataset
+original_indices = np.arange(len(dataset))
 labels = dataset.data.y.squeeze().cpu().numpy()
 
-# Assuming `dataset` is your original dataset and `labels` are the class labels
+# Split the dataset into training (80%), validation (10%), and test (10%) sets
+train_indices, temp_indices, _, temp_labels = train_test_split(
+    original_indices, labels, test_size=0.2, stratify=labels, random_state=42
+)
+
+val_indices, test_indices, _, _ = train_test_split(
+    temp_indices, temp_labels, test_size=0.5, random_state=42, stratify=temp_labels
+)
+
+# Create validation and test datasets
+val_dataset = [dataset[i] for i in val_indices]
+test_dataset = [dataset[i] for i in test_indices]
+
+# Upsample minority class in training set to address class imbalance
+train_labels = labels[train_indices]
+
 minority_class = 1.0  # Active molecules
 majority_class = 0.0  # Inactive molecules
 
-# Get indices of minority and majority classes
-minority_indices = [i for i, label in enumerate(labels) if label == minority_class]
-majority_indices = [i for i, label in enumerate(labels) if label == majority_class]
+# Get data points for each class
+minority_samples_train = [dataset[i] for i in train_indices if dataset[i].y.item() == minority_class]
+majority_samples_train = [dataset[i] for i in train_indices if dataset[i].y.item() == majority_class]
 
-# Create subsets for minority and majority classes
-minority_dataset = dataset[torch.tensor(minority_indices, dtype=torch.long)]
-majority_dataset = dataset[torch.tensor(majority_indices, dtype=torch.long)]
+# Upsample the minority class in the training set
+if len(minority_samples_train) > 0:
+    upsample_factor = len(majority_samples_train) // len(minority_samples_train)
+    upsampled_minority_train = minority_samples_train * upsample_factor
+    balanced_train_dataset = upsampled_minority_train + majority_samples_train
+else:
+    balanced_train_dataset = majority_samples_train  # No minority class samples to upsample
 
-# Calculate how many times to duplicate the minority class
-num_minority = len(minority_dataset)  # Number of samples in minority class
-num_majority = len(majority_dataset)  # Number of samples in majority class
-upsample_factor = num_majority // num_minority  # How many times to duplicate
-
-# Duplicate the minority class samples
-upsampled_minority_dataset = torch.utils.data.ConcatDataset([minority_dataset] * upsample_factor)
-
-# Combine the upsampled minority class with the majority class
-balanced_dataset = upsampled_minority_dataset + majority_dataset
+# Shuffle the balanced training dataset
+np.random.shuffle(balanced_train_dataset) 
 
 # Update labels after upsampling
-balanced_labels = [data.y.item() for data in balanced_dataset]
+balanced_train_labels = [data.y.item() for data in balanced_train_dataset]
 
 # Count class occurrences
-class_counts = Counter(balanced_labels)
+class_counts = Counter(balanced_train_labels)
 
 # Class weights for loss function, calculated based on the balanced dataset
 class_weights_list = [0.0] * dataset.num_classes # Initialize for all possible classes
 for cls, count in class_counts.items():
     if count > 0:
         # Use len(balanced_dataset) for the total count in the balanced dataset
-        class_weights_list[int(cls)] = len(balanced_dataset) / (dataset.num_classes * count)
+        class_weights_list[int(cls)] = len(balanced_train_dataset) / (dataset.num_classes * count)
 
 class_weights = torch.tensor(class_weights_list).to(device)
 
@@ -74,27 +87,11 @@ print("Dataset Class Balances: " + ", ".join([f"Class {cls}: {count}" for cls, c
 print(f"Class Weights: {class_weights}")
 
 """
-    Random Splitting Section
-"""
-
-# Train-Test split (80% train, 10% validation, 10% test)
-indices = np.arange(len(balanced_dataset))
-
-# Split indices into training (80%), validation (10%), and test (10%) sets
-train_indices, temp_indices = train_test_split(indices, test_size=0.2, random_state=42)
-valid_indices, test_indices = train_test_split(temp_indices, test_size=0.5, random_state=42)
-
-# Step 3: Create DataLoader for each dataset
-train_dataset = [balanced_dataset[i] for i in train_indices]
-val_dataset = [balanced_dataset[i] for i in valid_indices]
-test_dataset = [balanced_dataset[i] for i in test_indices]
-
-"""
     Input Normalization Section
 """
 
 # Compute mean and std **only from training data**
-all_x_train = torch.cat([data.x.float() for data in train_dataset], dim=0)
+all_x_train = torch.cat([data.x.float() for data in balanced_train_dataset], dim=0)
 mean = all_x_train.mean(dim=0, keepdim=True)
 std = all_x_train.std(dim=0, keepdim=True) + 1e-6  # Avoid division by zero
 
@@ -105,7 +102,7 @@ def normalize_dataset(dataset, mean, std):
     
     return dataset
 
-train_dataset = normalize_dataset(train_dataset, mean, std)
+train_dataset = normalize_dataset(balanced_train_dataset, mean, std)
 val_dataset = normalize_dataset(val_dataset, mean, std)
 test_dataset = normalize_dataset(test_dataset, mean, std)
 
@@ -195,6 +192,7 @@ ROLLOUT_MAX_STEPS = 20
 USE_BASELINE = True
 ENTROPY = 1e-3
 
+"""
 train_reinforce_rollout(env, policy, optimizer,
                         episodes=EPISODES,
                         rollout_M=ROLLOUT_M,
@@ -203,3 +201,18 @@ train_reinforce_rollout(env, policy, optimizer,
                         entropy_coeff=ENTROPY,
                         device=device,
                         log_every=10)
+"""
+
+"""
+    RL Agent Evaluation Section
+"""
+
+# ---- Recreate and load trained policy ----
+input_dim = dataset.num_node_features + 2  # must match training
+policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
+policy.load_state_dict(torch.load("./models/policy_model.pt", map_location=device))
+policy.to(device)
+policy.eval()
+
+evaluate_policy_ba2(baseline_gnn, policy, test_dataset, test_indices, device)
+
