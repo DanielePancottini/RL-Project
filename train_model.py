@@ -12,7 +12,7 @@ class Trainer:
         # Training params
         self.num_epochs = 10
         self.weight_decay = 1e-4
-        self.lr = 1e-5
+        self.lr = 1e-3
         
         # Model & Optimizer
         self.model = model
@@ -77,10 +77,10 @@ class Trainer:
                 output = self.model(data.x, data.edge_index, data.batch)
                 
                 # Convert logits to probabilities for AUC-ROC
-                probs = torch.sigmoid(output[:, 1])  # Get probability of class 1
+                probs = F.softmax(output, dim=1)[:, 1]  # Get probability of class 1
 
                 # Convert probabilities to binary class predictions
-                preds = (probs > 0.5).long()  # Threshold at 0.5
+                preds = torch.argmax(output, dim=1)
                 
                 all_probs.extend(probs.cpu().numpy())  # Probabilities for AUC-ROC
                 all_preds.extend(preds.cpu().numpy())  # Class predictions

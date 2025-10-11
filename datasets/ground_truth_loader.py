@@ -11,6 +11,7 @@ import numpy as np
 from tqdm import tqdm
 from torch_geometric.utils import to_networkx
 import networkx as nx
+import collections
 
 
 def load_ba2_ground_truth(shuffle=True):
@@ -177,77 +178,56 @@ def load_dataset_ground_truth(_dataset, shuffle=True, test_indices=None):
         print("Dataset does not exist")
         raise ValueError
     
-def generate_expert_data_from_ground_truth(dataset, train_indices, device):
+def generate_pretraining_samples(dataset, train_indices):
+    """Generate pretraining samples (graph, seed_node, BFS_sequence) for each graph.
+
+    For each graph in `train_indices` we optionally subsample seed nodes and
+    extract their k-hop neighborhood (default 3). The neighborhood nodes are
+    ordered by BFS starting from the seed node to form the target construction
+    sequence tau'. Returned list contains tuples (graph.cpu(), seed_node, bfs_seq).
     """
-    Generates expert trajectories directly from the BA2 dataset's ground truth.
 
-    Args:
-        dataset: The training dataset of graph Data objects. Must be shuffled with the
-                 same seed as the ground truth loader (RandomState(42)).
-        device: The device to use for tensor operations.
+    pretraining_samples = []
 
-    Returns:
-        A list of tuples, where each tuple is (graph_data, expert_node_sequence).
-    """
-    print("Generating expert data from ground truth...")
-    
-    # 1. Load the ground truth data. shuffle=True uses RandomState(42) by default,
-    #    which is crucial for alignment with a similarly shuffled dataset.
-    (gt_edge_indices, gt_edge_labels), _ = load_dataset_ground_truth("ba2", shuffle=True)
+    # Configuration
+    hops = 3
+    max_seeds_per_graph = 1  # set to int to subsample seeds (e.g., 20)
 
-    expert_trajectories = []
+    # Iterate graphs referenced by train_indices
+    for idx in tqdm(train_indices, desc="Generating Pretraining Samples"):
+        g_data = dataset[idx]
+        # Convert to networkx for neighborhood and BFS operations
+        g_nx = to_networkx(g_data, to_undirected=True)
 
-    for i in tqdm(train_indices, desc="Generating Expert Trajectories from GT"):
-        graph = dataset[i]
-        
-        # We use the same index 'i' to get the corresponding ground truth.
-        # This works because both datasets were shuffled with the same seed.
-        if i >= len(gt_edge_indices):
-            # This index corresponds to an upsampled graph which has no unique ground truth.
-            # You could try to find its original counterpart, but for now, we'll skip.
+        # All nodes in the graph
+        all_nodes = list(g_nx.nodes())
+        if not all_nodes:
             continue
 
-        # 2. Extract the expert node set from the edge labels
-        gt_edges_for_graph = torch.tensor(gt_edge_indices[i], dtype=torch.long)
-        gt_labels_for_graph = torch.tensor(gt_edge_labels[i], dtype=torch.long)
-        
-        # Find edges that are part of the ground truth (label == 1)
-        expert_edges = gt_edges_for_graph[:, gt_labels_for_graph == 1]
-        
-        if expert_edges.numel() == 0:
-            continue # Skip graphs with no ground truth explanation
+        # Optionally subsample seed nodes for speed
+        seed_nodes = all_nodes
+        if isinstance(max_seeds_per_graph, int) and max_seeds_per_graph > 0:
+            seed_nodes = random.sample(all_nodes, min(max_seeds_per_graph, len(all_nodes)))
 
-        # The expert node set is all unique nodes in the expert edges
-        expert_node_set = set(torch.unique(expert_edges.flatten()).cpu().numpy())
-        
-        if len(expert_node_set) <= 1:
-            continue
+        for seed in seed_nodes:
+            # Get k-hop neighborhood (including seed)
+            # Use BFS tree levels to compute nodes within `hops` distance
+            bfs_tree = nx.single_source_shortest_path_length(g_nx, seed, cutoff=hops)
+            neighborhood_nodes = set(bfs_tree.keys())
+            if len(neighborhood_nodes) <= 1:
+                continue
 
-        # 3. Create a BFS sequence from a random start node within the expert set
-        g_nx = to_networkx(graph, to_undirected=True)
-        subgraph_nx = g_nx.subgraph(expert_node_set) # Create a graph of only the expert nodes
-        
-        # Pick a random starting node from the motif itself
-        start_node = random.choice(list(expert_node_set))
-        
-        # The sequence starts with the seed node, followed by BFS nodes
-        try:
-            bfs_sequence = [start_node] + [node for _, node in nx.bfs_edges(subgraph_nx, source=start_node)]
-        except nx.NetworkXError:
-            # This can happen if the expert subgraph is disconnected.
-            # In that case, just use the nodes from the connected component of the start_node.
-            component_nodes = nx.node_connected_component(subgraph_nx, start_node)
-            component_graph = subgraph_nx.subgraph(component_nodes)
-            bfs_sequence = [start_node] + [node for _, node in nx.bfs_edges(component_graph, source=start_node)]
+            # Create subgraph induced by the neighborhood
+            sub_nx = g_nx.subgraph(neighborhood_nodes).copy()
 
+            # Generate BFS ordering starting from seed to produce the sequence tau'
+            bfs_order = list(nx.bfs_tree(sub_nx, source=seed))
 
-        # The 'actions' are the nodes to be added after the initial one.
-        expert_action_sequence = bfs_sequence[1:]
+            # Convert to list of ints (NetworkX nodes may be ints already)
+            bfs_sequence = [int(n) for n in bfs_order]
 
-        if not expert_action_sequence:
-            continue
+            # Store the sample: keep the original PyG graph, seed and sequence
+            pretraining_samples.append((g_data.cpu(), int(seed), bfs_sequence))
 
-        expert_trajectories.append((graph.cpu(), expert_action_sequence))
-
-    print(f"Generated {len(expert_trajectories)} expert trajectories from ground truth.")
-    return expert_trajectories
+    print(f"Generated {len(pretraining_samples)} pretraining samples.")
+    return pretraining_samples

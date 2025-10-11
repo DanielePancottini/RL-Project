@@ -6,6 +6,8 @@ from torch_geometric.data import Data, Batch
 from torch_geometric.utils import subgraph, degree
 import networkx as nx
 from torch.distributions import Categorical
+import collections
+import random
 
 class GNNInterpretEnvironment(gym.Env):
     def __init__(self, gnn_model, dataloader, max_steps = 50, device = 'cpu'):
@@ -19,7 +21,7 @@ class GNNInterpretEnvironment(gym.Env):
 
         # Reward weights
         self.size_weight = 0.01
-        self.radius_penalty_weight = 0.1
+        self.radius_penalty_weight = 0.01
         self.similarity_loss_weight = 0.01
 
         # Runtime state
@@ -56,12 +58,8 @@ class GNNInterpretEnvironment(gym.Env):
         # choose seed: gradient-based
         self.initial_node = self._choose_seed_gradient(graph)
         
-        # choose seed: highest degree
-        if graph.edge_index.numel() > 0:
-            deg = degree(graph.edge_index[0], num_nodes=graph.num_nodes)
-            self.initial_node = int(torch.argmax(deg).item())
-        else:
-            self.initial_node = 0
+        # choose seed: random
+        #self.initial_node = random.randint(0, graph.num_nodes - 1)
 
         self.S = {self.initial_node}
         self._precompute_graph_structures()
@@ -76,7 +74,7 @@ class GNNInterpretEnvironment(gym.Env):
             self.original_seed_node_embedding = self.gnn_model.embedding(self.current_graph.x, self.current_graph.edge_index)[self.initial_node].detach()
 
         return self._make_obs(self.S), {}
-    
+
     def _choose_seed_gradient(self, graph):
         graph.x.requires_grad = True
         self.gnn_model.eval()
@@ -248,7 +246,7 @@ class GNNInterpretEnvironment(gym.Env):
             S_indices = [obs_local['local_to_global'].index(n) for n in S_local]
             stop_idx = len(candidates)
             with torch.no_grad():
-                probs, value = policy(obs_local['x_aug'], obs_local['A_norm'], candidates, S_indices)
+                probs, _, _ = policy(obs_local['x_aug'], obs_local['A_norm'], candidates, S_indices)
             if probs.numel() == 1:
                 act_idx = 0
             else:

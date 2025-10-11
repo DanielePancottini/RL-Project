@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import torch
 import torch.nn as nn
@@ -69,83 +70,161 @@ class Policy(nn.Module):
         """Value estimate"""
         value = self.value_layer(H_stop).squeeze(-1)  # scalar
 
-        return all_probs, value
-
+        return all_probs, all_scores, value
 
 """
     Pretrain Policy
 """
-def pretrain_policy(policy, optimizer, expert_trajectories, env, epochs=25, device='cpu'):
+def pretrain_policy_listwise(policy, optimizer, pretraining_samples, env, epochs=10, device='cpu'):
     """
-    Pre-trains the policy using imitation learning on expert trajectories.
-    This corresponds to the paper's `pretrain_list` phase.
+    Pre-trains by dynamically generating a new random-length trajectory for each
+    training instance, exactly as described in the paper's reference code.
     """
-    print("Starting Policy Pre-training...")
+    print("Starting Policy Pre-training with dynamic trajectory generation...")
     policy.to(device)
     policy.train()
-    loss_fn = torch.nn.CrossEntropyLoss()
 
-    for epoch in range(1, epochs + 1):
-        total_loss = 0
-        
-        # Shuffle the trajectories for each epoch
-        random.shuffle(expert_trajectories)
-        
-        for graph, expert_actions in tqdm(expert_trajectories, desc=f"Pre-train Epoch {epoch}/{epochs}"):
-            
-            # Manually reset the environment with the current graph
-            # Note: This is a simplified reset, you may need to adapt it if your
-            # env.reset() does more complex things.
-            env.current_graph = graph.to(env.device)
-            if graph.edge_index.numel() > 0:
-                deg = degree(graph.edge_index[0], num_nodes=graph.num_nodes)
-                env.initial_node = int(torch.argmax(deg).item())
-            else:
-                env.initial_node = 0
-            
-            env.S = {env.initial_node}
+    # Use teacher-forcing pretraining as described
+    loss_fn = nn.CrossEntropyLoss()
+
+    for epoch in range(epochs):
+        print(f"--- Pretrain Epoch {epoch+1}/{epochs} ---")
+        random.shuffle(pretraining_samples)
+        seqs_processed = 0
+        total_loss_val = 0.0
+
+        for graph, seed_node, bfs_sequence in tqdm(pretraining_samples, desc=f"Pretrain Epoch {epoch+1}"):
+            # Initialize environment and graph structures for this sample
+            env.current_graph = graph.to(device)
+            env.initial_node = seed_node
             env._precompute_graph_structures()
-            
-            trajectory_loss = 0
-            
-            # Step through the expert trajectory
-            for expert_node_to_add in expert_actions:
-                # 1. Get the current state (observation) from the environment
-                obs = env._make_obs(env.S)
-                
-                # 2. Get the policy's action probabilities (logits) for the current state
-                probs, _ = policy(obs['x_aug'], obs['A_norm'], obs['candidate_nodes'], 
-                                                  [obs['local_to_global'].index(n) for n in env.S])
 
-                # 3. Find the index of the expert's action in the current candidate list
-                # This is our target label for the supervised loss.
-                candidate_nodes_global = [obs['local_to_global'][i] for i in obs['candidate_nodes']]
-                
-                try:
-                    # The index of the expert action becomes our target class
-                    target_action_index = candidate_nodes_global.index(expert_node_to_add)
-                    target = torch.tensor([target_action_index], device=env.device)
+            # Teacher forcing: start from the seed
+            current_subgraph_nodes = {seed_node}
+            accumulated_loss = 0
 
-                    # 4. Calculate the Cross-Entropy loss
-                    # We need to ignore the final "STOP" action logit for this.
-                    action_probs = probs[:-1] 
-                    trajectory_loss += loss_fn(action_probs.unsqueeze(0), target)
+            max_len = len(bfs_sequence) - 1
+            if max_len <= 0:
+                continue
+            trajectory_len = random.randint(1, max_len)
 
-                except ValueError:
-                    # The expert node is not in the candidate list, which can happen. We just skip this step.
-                    pass
-                
-                # 5. Manually apply the expert action to update the environment state for the next step
-                env.S.add(expert_node_to_add)
+            # Iterate through sequence and predict next node at each step
+            for t in range(trajectory_len):
+                obs = env._make_obs(current_subgraph_nodes)
 
-            if trajectory_loss > 0:
+                # boundary as global node ids
+                boundary_global = [obs['local_to_global'][i] for i in obs['candidate_nodes']]
+                if not boundary_global:
+                    break
+
+                S_indices = [obs['local_to_global'].index(n) for n in sorted(list(current_subgraph_nodes))]
+
+                # Raw scores (logits) for candidates + STOP
+                _, all_scores, _ = policy(obs['x_aug'], obs['A_norm'], obs['candidate_nodes'], S_indices)
+                action_logits = all_scores[:-1]
+
+                if action_logits.numel() == 0:
+                    break
+
+                target_node = bfs_sequence[t+1]
+                if target_node not in boundary_global:
+                    # If target not in boundary, we cannot train this step
+                    break
+
+                target_node_index = boundary_global.index(target_node)
+                target_tensor = torch.tensor([target_node_index], dtype=torch.long, device=device)
+
+                step_loss = loss_fn(action_logits.unsqueeze(0), target_tensor)
+                accumulated_loss = accumulated_loss + step_loss if isinstance(accumulated_loss, torch.Tensor) else (step_loss + accumulated_loss)
+
+                # Teacher forcing: add correct node for next step
+                current_subgraph_nodes.add(target_node)
+
+            # Backpropagate after the full sequence
+            if isinstance(accumulated_loss, torch.Tensor) and accumulated_loss.item() > 0:
                 optimizer.zero_grad()
-                trajectory_loss.backward()
+                accumulated_loss.backward()
                 optimizer.step()
-                total_loss += trajectory_loss.item()
-        
-        avg_loss = total_loss / len(expert_trajectories) if len(expert_trajectories) > 0 else 0
-        print(f"[Pre-train Epoch {epoch}/{epochs}] Average Loss: {avg_loss:.4f}")
+                seqs_processed += 1
+                total_loss_val += accumulated_loss.item()
+
+        avg_loss = total_loss_val / seqs_processed if seqs_processed > 0 else 0.0
+        print(f"[Pretrain Epoch {epoch+1}] sequences={seqs_processed} avg_loss={avg_loss:.6f}")
+
+def pretrain_policy_setwise(policy, optimizer, pretraining_samples, env, epochs=25, device='cpu'):
+    """
+    Refines pre-training using Set-wise MLE. At each step, the model is trained
+    on its own greedy prediction, reinforcing its confidence.
+    """
+    print("Starting Policy Pre-training (Phase 2: Set-wise MLE)...")
+    policy.to(device)
+    policy.train()
+    loss_fn = nn.CrossEntropyLoss()
+
+    for epoch in range(epochs):
+        print(f"--- Set-wise Pretrain Epoch {epoch+1}/{epochs} ---")
+        random.shuffle(pretraining_samples)
+        seqs_processed = 0
+        total_loss_val = 0.0
+
+        for graph, seed_node, bfs_sequence in tqdm(pretraining_samples, desc=f"Set-wise Epoch {epoch+1}"):
+            # The target is the full set of nodes, not the sequence
+            target_subgraph_S = set(bfs_sequence)
+            
+            # Initialize environment
+            env.current_graph = graph.to(device)
+            env.initial_node = seed_node
+            env._precompute_graph_structures()
+
+            current_subgraph_nodes = {seed_node}
+            accumulated_loss = 0
+            
+            # We iterate until we've built a subgraph of the target size
+            for t in range(len(target_subgraph_S) - 1):
+                obs = env._make_obs(current_subgraph_nodes)
+                boundary_global = [obs['local_to_global'][i] for i in obs['candidate_nodes']]
+                if not boundary_global:
+                    break
+
+                S_indices = [obs['local_to_global'].index(n) for n in sorted(list(current_subgraph_nodes))]
+
+                # Get the model's logits (raw scores)
+                _, all_scores, _ = policy(obs['x_aug'], obs['A_norm'], obs['candidate_nodes'], S_indices)
+                action_logits = all_scores[:-1]
+
+                if action_logits.numel() == 0:
+                    break
+
+                # --- THIS IS THE KEY DIFFERENCE ---
+                # 1. The target is the model's own most-confident prediction (greedy choice)
+                target_node_index = torch.argmax(action_logits).item()
+                target_tensor = torch.tensor([target_node_index], dtype=torch.long, device=device)
+                
+                # 2. Get the actual node ID for the next step
+                target_node_global = boundary_global[target_node_index]
+                # --- END OF DIFFERENCE ---
+
+                step_loss = loss_fn(action_logits.unsqueeze(0), target_tensor)
+                accumulated_loss += step_loss
+
+                # Teacher-force using the model's own greedy choice
+                current_subgraph_nodes.add(target_node_global)
+                
+                # Stop if we've already generated all nodes in the target set
+                if current_subgraph_nodes == target_subgraph_S:
+                    break
+
+            # Backpropagate after the full sequence
+            if isinstance(accumulated_loss, torch.Tensor) and accumulated_loss.item() > 0:
+                optimizer.zero_grad()
+                accumulated_loss.backward()
+                optimizer.step()
+                seqs_processed += 1
+                total_loss_val += accumulated_loss.item()
+
+        avg_loss = total_loss_val / seqs_processed if seqs_processed > 0 else 0.0
+        print(f"[Set-wise Epoch {epoch+1}] sequences={seqs_processed} avg_loss={avg_loss:.6f}")
+
 
 """
     Training Loop
@@ -160,7 +239,8 @@ def train_reinforce_rollout(env,
                             rollout_max_steps = None,
                             baseline = True,
                             device = 'cpu',
-                            log_every = 10):
+                            log_every = 10,
+                            model_path = "./models/policy_model.pt"):
     policy.to(device)
     for ep in range(1, episodes + 1):
     
@@ -180,10 +260,12 @@ def train_reinforce_rollout(env,
             candidates = list(obs['candidate_nodes'])
             S_indices = [obs['local_to_global'].index(n) for n in env.S]
 
-            probs, value = policy(x_aug, A_norm, candidates, S_indices)
+            probs, _, value = policy(x_aug, A_norm, candidates, S_indices)
+            
             dist = Categorical(probs)
             action_idx = dist.sample()
             logp = dist.log_prob(action_idx)
+
             entropies.append(dist.entropy())
 
             # apply action on main env
@@ -258,6 +340,11 @@ def train_reinforce_rollout(env,
 
     print("Training complete, saving model.")
 
+    # Create directory if it does not exist
+    model_dir = os.path.dirname(model_path)
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+
     # Save
-    torch.save(policy.state_dict(), "./models/policy_model.pt")
+    torch.save(policy.state_dict(), model_path)
 

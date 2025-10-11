@@ -1,11 +1,11 @@
 import torch
 from datasets.ba2dataset import BA2Dataset
-from datasets.ground_truth_loader import generate_expert_data_from_ground_truth
+from datasets.ground_truth_loader import generate_pretraining_samples
 from evaluate_policy import evaluate_policy_ba2
 from load_gcn import load_gcn_checkpoint
 from torch_geometric.loader import DataLoader
 from env import GNNInterpretEnvironment
-from policy import Policy, pretrain_policy
+from policy import Policy, pretrain_policy_listwise, pretrain_policy_setwise
 from model import GCNModel
 from sklearn.model_selection import train_test_split
 from train_model import Trainer
@@ -116,6 +116,9 @@ train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, dr
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
+## DataLoader for RL Environment (batch size MUST be 1)
+env_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+
 """
     TEST
 """
@@ -134,7 +137,7 @@ num_classes = dataset.num_classes
     Training Section
 """
 
-model_path = "./models/ba2/best_model"
+model_path = "./models/ba2/trained_model.pt"
 
 # Model Definition
 model = GCNModel(features_dim, num_classes, device).to(device)
@@ -146,8 +149,13 @@ if not os.path.exists(model_path):
     trainer = Trainer(model, class_weights, device)
     trained_model = trainer.train(train_loader, val_loader)
 
+    # Create directory if it does not exist
+    model_dir = os.path.dirname(model_path)
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+
     # Save the model
-    torch.save(trained_model.state_dict(), "./models/trained_model.pt")
+    torch.save(trained_model.state_dict(), model_path)
 
     """
         Evaluation Section
@@ -165,25 +173,68 @@ if not os.path.exists(model_path):
     print(f"AUC-ROC: {auc_roc}")
 
 model, info = load_gcn_checkpoint(model, model_path, device)
+model.eval()
+
+"""
+    RL Agent Pre-training
+"""
+# The policy and optimizer for the RL agent
+input_dim = features_dim + 2  # original features + start flag + in-S flag
+policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
+optimizer = torch.optim.Adam(policy.parameters(), lr=1e-3) # A slightly higher LR can be good for pre-training
+
+# Load pre-trained policy if it exists
+PRETRAINED_POLICY_MODEL_PATH = "./models/ba2/pretrained_policy.pt"
+
+if os.path.exists(PRETRAINED_POLICY_MODEL_PATH):
+    print(f"Loading pre-trained policy from {PRETRAINED_POLICY_MODEL_PATH}...")
+    policy.load_state_dict(torch.load(PRETRAINED_POLICY_MODEL_PATH, map_location=device))
+else:
+    print("No pre-trained policy found. Starting pre-training...")
+
+    # 1. Generate the expert trajectories using your existing function
+    # We use the balanced_train_dataset because it was shuffled with the same logic.
+    # The `train_indices` are the original indices before upsampling.
+    pretraining_samples = generate_pretraining_samples(
+        dataset=dataset,
+        train_indices=train_indices
+    )
+
+    # 2. Create the environment instance needed for the pre-training function
+    env = GNNInterpretEnvironment(gnn_model=model, dataloader=env_dataloader, max_steps=20, device=device)
+
+    # 3. Call your pre-training function
+    pretrain_policy_listwise(
+        policy=policy,
+        optimizer=optimizer,
+        pretraining_samples=pretraining_samples,
+        env=env,
+        epochs=5,
+        device=device
+    )
+
+    print("\n--- Starting Pre-training Phase 2: Set-wise MLE ---")
+    pretrain_policy_setwise(
+        policy=policy,
+        optimizer=optimizer,
+        pretraining_samples=pretraining_samples,
+        env=env,
+        epochs=10, # As per paper's supplementary material
+        device=device
+    )
+
+    # 3. Save the pre-trained model for future runs
+    print(f"Pre-training complete. Saving model to {PRETRAINED_POLICY_MODEL_PATH}...")
+    # Ensure the directory exists before saving
+    os.makedirs(os.path.dirname(PRETRAINED_POLICY_MODEL_PATH), exist_ok=True)
+    torch.save(policy.state_dict(), PRETRAINED_POLICY_MODEL_PATH)
 
 """
     RL Agent Training
 """
 
-# Define PPO DataLoaders
-env_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True, drop_last=False)
-
-model.eval()
-
-# Assuming you have your baseline GNN model and data
-baseline_gnn = model
-
-env = GNNInterpretEnvironment(gnn_model=baseline_gnn, dataloader=env_dataloader, max_steps=20, device=device)
-
-# policy
-input_dim = features_dim + 2  # original features + start flag + in-S flag
-policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
-optimizer = torch.optim.Adam(policy.parameters(), lr=1e-4)
+env = GNNInterpretEnvironment(gnn_model=model, dataloader=env_dataloader, max_steps=20, device=device)
+optimizer = torch.optim.Adam(policy.parameters(), lr=5e-4)
 
 # training hyperparameters
 EPISODES = 300
@@ -191,8 +242,8 @@ ROLLOUT_M = 5            # Monte-Carlo rollouts per intermediate step (paper use
 ROLLOUT_MAX_STEPS = 20
 USE_BASELINE = True
 ENTROPY = 1e-3
+POLICY_MODEL_PATH = "./models/policy_model.pt"
 
-"""
 train_reinforce_rollout(env, policy, optimizer,
                         episodes=EPISODES,
                         rollout_M=ROLLOUT_M,
@@ -200,19 +251,18 @@ train_reinforce_rollout(env, policy, optimizer,
                         baseline=USE_BASELINE,
                         entropy_coeff=ENTROPY,
                         device=device,
-                        log_every=10)
-"""
+                        log_every=10,
+                        model_path=POLICY_MODEL_PATH)
 
 """
     RL Agent Evaluation Section
 """
 
 # ---- Recreate and load trained policy ----
-input_dim = dataset.num_node_features + 2  # must match training
 policy = Policy(input_dim=input_dim, hidden_dim=64, L=3, alpha=0.85, device=device)
-policy.load_state_dict(torch.load("./models/policy_model.pt", map_location=device))
+policy.load_state_dict(torch.load(POLICY_MODEL_PATH, map_location=device))
 policy.to(device)
 policy.eval()
 
-evaluate_policy_ba2(baseline_gnn, policy, test_dataset, test_indices, device)
+evaluate_policy_ba2(model, policy, test_dataset, test_indices, device)
 
